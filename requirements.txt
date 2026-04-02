@@ -1,0 +1,6 @@
+whisperx
+fastapi
+uvicorn[standard]
+python-multipart
+resemblyzer
+setuptools==69.5.1

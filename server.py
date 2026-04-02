@@ -1,0 +1,287 @@
+import re
+import tempfile
+import os
+import logging
+import numpy as np
+from pathlib import Path
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+from typing import Optional
+import whisperx
+from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+from resemblyzer import VoiceEncoder, preprocess_wav
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+DEVICE = "cpu"
+COMPUTE_TYPE = "float32"
+MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
+HF_TOKEN = os.environ.get("HF_TOKEN")
+SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.75"))
+PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", "~/.omi/speakers")).expanduser()
+
+# Trigger phrase: "remember/save/call/name this voice as NAME"
+CAPTURE_TRIGGER = re.compile(
+    r"\b(?:remember|save|call|name)\s+this\s+voice\s+as\s+(.+)",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Load models
+# ---------------------------------------------------------------------------
+logger.info(f"Loading whisperx model '{MODEL_SIZE}' on {DEVICE} ...")
+model = whisperx.load_model(MODEL_SIZE, DEVICE, compute_type=COMPUTE_TYPE)
+
+logger.info("Loading diarization pipeline ...")
+diarize_model = DiarizationPipeline(token=HF_TOKEN, device=DEVICE)
+
+logger.info("Loading speaker encoder ...")
+voice_encoder = VoiceEncoder(device=DEVICE)
+
+
+# ---------------------------------------------------------------------------
+# Speaker registry
+# ---------------------------------------------------------------------------
+def load_profiles() -> dict[str, np.ndarray]:
+    profiles = {}
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    for f in PROFILES_DIR.glob("*.npy"):
+        if f.stem.startswith("__"):
+            continue
+        name = f.stem.replace("_", " ")
+        profiles[name] = np.load(f)
+        logger.info(f"Loaded speaker profile: {name}")
+    return profiles
+
+
+def save_profile(name: str, embedding: np.ndarray) -> None:
+    filename = name.strip().replace(" ", "_") + ".npy"
+    np.save(PROFILES_DIR / filename, embedding)
+    logger.info(f"Saved speaker profile: {name}")
+
+
+named_speakers: dict[str, np.ndarray] = load_profiles()
+capture_pending: Optional[str] = None
+recent_text_buffer: list[str] = []
+
+logger.info("Models ready.")
+
+app = FastAPI()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def is_hallucination(seg: dict) -> bool:
+    text = seg.get("text", "").strip()
+    if not text:
+        return True
+    words = text.split()
+    if len(words) > 6 and len(set(words)) / len(words) < 0.3:
+        return True
+    return False
+
+
+def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.ndarray]:
+    """Extract per-speaker voice embeddings from diarized audio."""
+    import soundfile as sf
+    audio, sr = sf.read(audio_path)
+    speaker_chunks: dict[str, list[np.ndarray]] = {}
+
+    for _, row in diarize_segments.iterrows():
+        label = row.get("speaker", "UNKNOWN")
+        start = int(row["start"] * sr)
+        end = int(row["end"] * sr)
+        chunk = audio[start:end]
+        if len(chunk) < sr:  # skip < 1s segments
+            continue
+        try:
+            wav = preprocess_wav(chunk.astype(np.float32), source_sr=sr)
+            emb = voice_encoder.embed_utterance(wav)
+            speaker_chunks.setdefault(label, []).append(emb)
+        except Exception:
+            continue
+
+    return {
+        label: np.mean(embs, axis=0)
+        for label, embs in speaker_chunks.items()
+        if embs
+    }
+
+
+def similarity(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def resolve_name(label: str, speaker_embeddings: dict[str, np.ndarray]) -> str:
+    """Map SPEAKER_XX to a known name if similarity exceeds threshold."""
+    emb = speaker_embeddings.get(label)
+    if emb is None:
+        return label
+
+    best_name, best_score = None, 0.0
+    for name, profile in named_speakers.items():
+        score = similarity(profile, emb)
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    if best_name and best_score >= SPEAKER_THRESHOLD:
+        return best_name
+
+    return label
+
+
+def check_capture_trigger(segments: list[dict]) -> Optional[str]:
+    """Detect trigger across current + previous chunk to handle boundary splits."""
+    current_text = " ".join(s.get("text", "") for s in segments)
+    recent_text_buffer.append(current_text)
+    if len(recent_text_buffer) > 2:
+        recent_text_buffer.pop(0)
+
+    match = CAPTURE_TRIGGER.search(" ".join(recent_text_buffer))
+    if match:
+        name = match.group(1).strip().title()
+        recent_text_buffer.clear()
+        return name
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@app.post("/inference")
+async def inference(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    temperature: Optional[float] = Form(0.0),
+    response_format: Optional[str] = Form("verbose_json"),
+):
+    global capture_pending
+
+    audio_bytes = await file.read()
+    suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(audio_bytes)
+        audio_path = f.name
+
+    try:
+        # Transcribe — always, all speakers
+        result = model.transcribe(audio_path, language=language, task="transcribe", batch_size=8)
+        detected_lang = result.get("language", language or "hi")
+
+        align_model, metadata = whisperx.load_align_model(language_code=detected_lang, device=DEVICE)
+        result = whisperx.align(result["segments"], align_model, metadata, audio_path, DEVICE)
+
+        diarize_segments = diarize_model(audio_path)
+        result = assign_word_speakers(diarize_segments, result)
+        segments = result.get("segments", [])
+
+        # Extract per-speaker embeddings for name resolution
+        speaker_embeddings = get_speaker_embeddings(audio_path, diarize_segments)
+
+        # Check for "remember this voice as NAME" trigger
+        triggered_name = check_capture_trigger(segments)
+        if triggered_name:
+            capture_pending = triggered_name
+            logger.info(f"Capture mode: will enroll next new speaker as '{triggered_name}'")
+
+        # Enroll the new speaker from this chunk if capture is pending
+        if capture_pending and named_speakers.get(capture_pending) is None:
+            for label, emb in speaker_embeddings.items():
+                # Pick the first speaker that isn't already known
+                already_known = any(
+                    similarity(profile, emb) >= SPEAKER_THRESHOLD
+                    for profile in named_speakers.values()
+                )
+                if not already_known:
+                    named_speakers[capture_pending] = emb
+                    save_profile(capture_pending, emb)
+                    logger.info(f"Enrolled new speaker: '{capture_pending}'")
+                    capture_pending = None
+                    break
+
+        # Build response
+        full_text = " ".join(s.get("text", "").strip() for s in segments)
+        duration = float(segments[-1]["end"]) if segments else 0.0
+
+        formatted_segments = [
+            {
+                "id": i,
+                "seek": 0,
+                "start": round(seg.get("start", 0.0), 2),
+                "end": round(seg.get("end", 0.0), 2),
+                "text": seg.get("text", "").strip(),
+                "speaker": resolve_name(seg.get("speaker", "UNKNOWN"), speaker_embeddings),
+                "tokens": [],
+                "temperature": temperature,
+                "avg_logprob": seg.get("avg_logprob", 0.0),
+                "compression_ratio": seg.get("compression_ratio", 1.0),
+                "no_speech_prob": seg.get("no_speech_prob", 0.0),
+            }
+            for i, seg in enumerate(segments)
+            if not is_hallucination(seg)
+        ]
+
+        for seg in formatted_segments:
+            logger.info(f"[{seg['speaker']}] {seg['start']}-{seg['end']}s: {seg['text']}")
+
+        return JSONResponse({
+            "task": "transcribe",
+            "language": detected_lang,
+            "duration": duration,
+            "text": full_text,
+            "segments": formatted_segments,
+        })
+
+    finally:
+        os.unlink(audio_path)
+
+
+@app.get("/speakers")
+async def list_speakers():
+    return {
+        "named_speakers": list(named_speakers.keys()),
+        "capture_pending": capture_pending,
+    }
+
+
+@app.delete("/speakers/{name}")
+async def delete_speaker(name: str):
+    key = name.replace("-", " ").replace("%20", " ")
+    filename = PROFILES_DIR / (key.replace(" ", "_") + ".npy")
+    named_speakers.pop(key, None)
+    if filename.exists():
+        filename.unlink()
+    return JSONResponse({"status": "deleted", "name": key})
+
+
+@app.delete("/speakers")
+async def reset_all():
+    global capture_pending
+    capture_pending = None
+    named_speakers.clear()
+    recent_text_buffer.clear()
+    for f in PROFILES_DIR.glob("*.npy"):
+        if not f.stem.startswith("__"):
+            f.unlink()
+    return JSONResponse({"status": "reset"})
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "model": MODEL_SIZE,
+        "named_speakers": list(named_speakers.keys()),
+        "capture_pending": capture_pending,
+        "speaker_threshold": SPEAKER_THRESHOLD,
+    }
