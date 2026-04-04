@@ -3,6 +3,7 @@ import tempfile
 import os
 import logging
 import numpy as np
+import torch
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
@@ -20,12 +21,39 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DEVICE = "cpu"
-COMPUTE_TYPE = "float32"
 MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
+BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 HF_TOKEN = os.environ.get("HF_TOKEN")
-SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.75"))
+SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.80"))
 PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", "~/.omi/speakers")).expanduser()
+
+# Initial prompt for bilingual (Hindi+English / Hinglish) transcription.
+# Override via WHISPER_INITIAL_PROMPT env var. The default primes Whisper
+# to expect code-switching between Hindi and English.
+INITIAL_PROMPT = os.environ.get(
+    "WHISPER_INITIAL_PROMPT",
+    "यह हिंदी और English में mixed conversation है। The speaker switches between Hindi and English freely.",
+)
+
+# ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+# faster-whisper (CTranslate2) only supports "cpu" and "cuda" — NOT MPS.
+# Use int8 on CPU (~3x faster than float32) or float16 on CUDA.
+if torch.cuda.is_available():
+    WHISPER_DEVICE = "cuda"
+    COMPUTE_TYPE = "float16"
+else:
+    WHISPER_DEVICE = "cpu"
+    COMPUTE_TYPE = "int8"
+
+# PyTorch models (alignment, diarization) fully support MPS on Apple Silicon.
+if torch.backends.mps.is_available():
+    TORCH_DEVICE = "mps"
+elif torch.cuda.is_available():
+    TORCH_DEVICE = "cuda"
+else:
+    TORCH_DEVICE = "cpu"
 
 # Trigger phrase: "remember/save/call/name this voice as NAME"
 CAPTURE_TRIGGER = re.compile(
@@ -36,14 +64,18 @@ CAPTURE_TRIGGER = re.compile(
 # ---------------------------------------------------------------------------
 # Load models
 # ---------------------------------------------------------------------------
-logger.info(f"Loading whisperx model '{MODEL_SIZE}' on {DEVICE} ...")
-model = whisperx.load_model(MODEL_SIZE, DEVICE, compute_type=COMPUTE_TYPE)
+logger.info(
+    f"Loading whisperx model '{MODEL_SIZE}' | "
+    f"whisper={WHISPER_DEVICE}/{COMPUTE_TYPE} torch={TORCH_DEVICE}"
+)
+model = whisperx.load_model(MODEL_SIZE, WHISPER_DEVICE, compute_type=COMPUTE_TYPE)
 
 logger.info("Loading diarization pipeline ...")
-diarize_model = DiarizationPipeline(token=HF_TOKEN, device=DEVICE)
+diarize_model = DiarizationPipeline(token=HF_TOKEN, device=TORCH_DEVICE)
 
 logger.info("Loading speaker encoder ...")
-voice_encoder = VoiceEncoder(device=DEVICE)
+# resemblyzer does not support MPS; keep on CPU
+voice_encoder = VoiceEncoder(device="cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +207,27 @@ async def inference(
 
     try:
         # Transcribe — always, all speakers
-        result = model.transcribe(audio_path, language=language, task="transcribe", batch_size=8)
+        # initial_prompt primes Whisper for Hindi/English code-switching
+        result = model.transcribe(
+            audio_path,
+            language=language,
+            task="transcribe",
+            batch_size=BATCH_SIZE,
+            initial_prompt=INITIAL_PROMPT if not language else None,
+        )
         detected_lang = result.get("language", language or "hi")
 
-        align_model, metadata = whisperx.load_align_model(language_code=detected_lang, device=DEVICE)
-        result = whisperx.align(result["segments"], align_model, metadata, audio_path, DEVICE)
+        # Alignment: fall back to "hi" if detected language has no alignment model
+        try:
+            align_model, metadata = whisperx.load_align_model(
+                language_code=detected_lang, device=TORCH_DEVICE
+            )
+            result = whisperx.align(
+                result["segments"], align_model, metadata, audio_path, TORCH_DEVICE
+            )
+        except Exception as e:
+            logger.warning(f"Alignment failed for lang '{detected_lang}': {e} — skipping alignment")
+            # segments still usable; just without word-level timestamps
 
         diarize_segments = diarize_model(audio_path)
         result = assign_word_speakers(diarize_segments, result)

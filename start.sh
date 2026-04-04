@@ -15,9 +15,12 @@ else
 fi
 
 export WHISPER_MODEL="${WHISPER_MODEL:-medium}"
-export MIN_SECONDS="${MIN_SECONDS:-8}"
+export WHISPER_BATCH_SIZE="${WHISPER_BATCH_SIZE:-16}"
+# SPEAKER_THRESHOLD default is 0.80 (set in server.py); override here if needed
+# export SPEAKER_THRESHOLD="0.80"
+# WHISPER_INITIAL_PROMPT: default Hindi/English bilingual prompt is set in server.py
 
-echo "Starting omi-whisperx server (model=$WHISPER_MODEL, min_seconds=$MIN_SECONDS) ..."
+echo "Starting omi-whisperx server (model=$WHISPER_MODEL, batch=$WHISPER_BATCH_SIZE) ..."
 exec uvicorn server:app \
   --host 0.0.0.0 \
   --port 8080 \
