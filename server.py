@@ -256,14 +256,11 @@ async def _classify_with_ollama(text: str) -> str:
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             last_exc = e
             last_exc_kind = "unreachable" if isinstance(e, httpx.ConnectError) else "timeout"
+            logger.warning(
+                f"[FILTER] Ollama {last_exc_kind} (attempt {attempt}/{_OLLAMA_RETRY_ATTEMPTS}): {e}"
+            )
             if attempt < _OLLAMA_RETRY_ATTEMPTS:
-                logger.warning(
-                    f"[FILTER] Ollama {last_exc_kind} (attempt {attempt}/{_OLLAMA_RETRY_ATTEMPTS}), "
-                    f"retrying in {_OLLAMA_RETRY_DELAY}s…"
-                )
                 await asyncio.sleep(_OLLAMA_RETRY_DELAY)
-            else:
-                logger.warning(f"[FILTER] Ollama {last_exc_kind} after {_OLLAMA_RETRY_ATTEMPTS} attempts — keeping chunk")
         except Exception as e:
             await notify("Ollama error", f"{type(e).__name__}: {e}", priority="high", tags="x")
             logger.warning(f"[FILTER] Ollama error ({e}) — keeping chunk")
@@ -273,12 +270,13 @@ async def _classify_with_ollama(text: str) -> str:
     # do a lightweight TCP probe before alerting to avoid false positives.
     source_ip = _get_source_ip()
     reachable = await _tcp_probe(OLLAMA_URL)
+    exc_summary = f"{type(last_exc).__name__}: {last_exc}"
     if reachable:
         logger.warning(
-            f"[FILTER] Ollama API failed after {_OLLAMA_RETRY_ATTEMPTS} attempts "
-            f"but TCP probe succeeded — skipping alert (transient issue resolved)"
+            f"[FILTER] Ollama {last_exc_kind} after {_OLLAMA_RETRY_ATTEMPTS} attempts "
+            f"but TCP probe succeeded — API may be starting up. URL: {OLLAMA_URL}"
         )
-        return "keep", "unreachable"
+        return "keep", f"tcp_ok but api {last_exc_kind}: {exc_summary}"
 
     if last_exc_kind == "unreachable":
         await notify(
@@ -287,7 +285,7 @@ async def _classify_with_ollama(text: str) -> str:
             f"Source IP: {source_ip}\n{last_exc}",
             priority="high", tags="no_entry",
         )
-        return "keep", "unreachable"
+        return "keep", f"connect_refused: {OLLAMA_URL}"
     else:
         await notify(
             "Ollama timeout",
@@ -295,7 +293,7 @@ async def _classify_with_ollama(text: str) -> str:
             f"Source IP: {source_ip}",
             tags="hourglass_flowing_sand",
         )
-        return "keep", "timeout"
+        return "keep", f"timeout ({OLLAMA_TIMEOUT}s): {OLLAMA_URL}"
 
 
 async def classify_content(text: str, chunk_id: str) -> str:
