@@ -651,7 +651,7 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
             result = await asyncio.to_thread(
                 model.transcribe, audio_path,
                 language=language or None, task="transcribe",
-                batch_size=BATCH_SIZE, initial_prompt=None,
+                batch_size=BATCH_SIZE,
             )
             timings["transcription"] = time.perf_counter() - t0
             detected_lang = result.get("language", language or "en")
