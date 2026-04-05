@@ -24,7 +24,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py benchmark.py ./
+COPY server.py benchmark.py ui.html ./
 
 # HuggingFace model cache and speaker profiles — mount a volume here
 ENV HF_HOME=/data/huggingface

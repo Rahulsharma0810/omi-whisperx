@@ -233,23 +233,33 @@ services:
       - "8080:8080"
     environment:
       HF_TOKEN: your_token_here
-      WHISPER_MODEL: medium        # tiny/base/small/medium/large-v2
-      WHISPER_BATCH_SIZE: "4"      # lower on RPi5 to save RAM
+      WHISPER_MODEL: medium          # tiny/base/small/medium/large-v2
+      WHISPER_BATCH_SIZE: "4"        # lower on RPi5 to save RAM
       SPEAKER_THRESHOLD: "0.80"
+      CONTENT_FILTER: "true"
+      NLI_ENABLED: "true"
+      NLI_THRESHOLD: "0.85"
+      OLLAMA_ENABLED: "false"        # set true + OLLAMA_URL to enable Tier 2
+      OLLAMA_URL: "http://192.168.1.X:11434"
+      OLLAMA_MODEL: "gemma2:2b"
     volumes:
-      - omi_data:/data             # model cache + speaker profiles
+      - omi_data:/data               # model cache + speaker profiles
 volumes:
   omi_data:
 ```
 
 **Key files:**
-- `Dockerfile` — multi-arch build, installs CPU-only torch on arm64
+- `Dockerfile` — multi-arch build; installs CPU-only torch on arm64; copies `server.py`, `benchmark.py`, `ui.html`
 - `.github/workflows/docker.yml` — triggers on changes to server.py, requirements.txt, or Dockerfile
 - `/data/huggingface` — HuggingFace model cache (mount a volume — models are ~2–4 GB)
 - `/data/speakers` — speaker embedding profiles (persistent)
 
-Models are **not** baked into the image. They download on first container start (~5 min).
-Subsequent starts are fast once the volume is populated.
+**Build notes:**
+- `build-essential` + `python3-dev` are installed in the image — required to compile `webrtcvad` (C extension pulled by whisperx)
+- arm64 CI build via QEMU takes ~20–30 min — this is normal
+- Models are **not** baked into the image; they download on first container start (~5 min)
+
+Live dashboard is available at `http://<host>:8080/ui` once the container is running.
 
 ## Do Not
 
