@@ -64,101 +64,32 @@ CAPTURE_TRIGGER = re.compile(
 
 # ---------------------------------------------------------------------------
 # Content filter — drops entertainment chunks so Omi doesn't save them
+# Toggle: CONTENT_FILTER=false to disable entirely
 # ---------------------------------------------------------------------------
 CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "true").lower() == "true"
-FILTER_DIR = Path(os.environ.get("FILTER_DIR", "~/.omi")).expanduser()
 
-# Ollama LLM classifier — set OLLAMA_ENABLED=true and point OLLAMA_URL at your machine
+# Ollama LLM classifier
+# Enable: OLLAMA_ENABLED=true
+# Point at your machine: OLLAMA_URL=http://192.168.1.X:11434
 OLLAMA_ENABLED = os.environ.get("OLLAMA_ENABLED", "false").lower() == "true"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma2:2b")
 OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "5"))
 
-# Built-in entertainment signals (need ≥2 hits to trigger, avoids false positives)
-_ENTERTAINMENT_SIGNALS: list[str] = [
-    # Red Dead Redemption 2
-    "arthur morgan", "dutch van der linde", "hosea matthews", "micah bell",
-    "javier escuella", "john marston", "red dead redemption",
-    "blackwater", "saint denis", "strawberry", "valentine",
-    # Hitman / Agent 47
-    "agent 47", "diana burnwood", "elusive target", "silent assassin",
-    "contracts mode",
-    # Generic game-mechanics phrases
-    "mission failed", "mission complete", "mission passed",
-    "game over", "respawn", "checkpoint reached",
-    "achievement unlocked", "press x to", "press a to",
-    "health regenerating", "wanted level",
-    "new objective", "follow the marker",
-]
 
-# Informative / educational signals — ≥2 hits keep the chunk regardless
-_INFORMATIVE_SIGNALS: list[str] = [
-    "in this video", "in today's video", "in this tutorial",
-    "let me show you", "let me explain", "let me walk you through",
-    "how to", "step by step", "the reason why", "which means that",
-    "in other words", "for example", "for instance",
-    "according to", "research shows", "studies show",
-    "the key takeaway", "important point",
-    "next step", "let's dive into", "let's talk about",
-    "tutorial", "explained", "guide", "tips and tricks",
-    "if you found this helpful", "hope this helps",
-]
-
-
-def _load_keyword_file(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    return [
-        line.strip().lower()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-
-
-def _load_filter_lists() -> tuple[list[str], list[str]]:
-    block = _load_keyword_file(FILTER_DIR / "block_keywords.txt")
-    allow = _load_keyword_file(FILTER_DIR / "allow_keywords.txt")
-    if block:
-        logger.info(f"Loaded {len(block)} custom block keywords")
-    if allow:
-        logger.info(f"Loaded {len(allow)} custom allow keywords")
-    return block, allow
-
-
-_user_block, _user_allow = _load_filter_lists()
-
-
-def _classify_with_keywords(text: str) -> str:
+async def classify_content(text: str) -> str:
     """
-    Fast keyword-based fallback classifier.
-    Returns 'entertainment', 'keep', or 'unknown' (ambiguous).
+    Classifies transcript via Ollama.
+    Returns 'entertainment' or 'keep'.
+    If filter is disabled, Ollama is off, or Ollama is unreachable — always returns 'keep'.
     """
-    t = text.lower()
-
-    if any(kw in t for kw in _user_allow):
+    if not CONTENT_FILTER_ENABLED or not OLLAMA_ENABLED or not text.strip():
         return "keep"
 
-    if sum(1 for s in _INFORMATIVE_SIGNALS if s in t) >= 2:
-        return "keep"
-
-    if any(kw in t for kw in _user_block):
-        return "entertainment"
-
-    if sum(1 for s in _ENTERTAINMENT_SIGNALS if s in t) >= 2:
-        return "entertainment"
-
-    return "unknown"
-
-
-async def _classify_with_ollama(text: str) -> Optional[str]:
-    """
-    Ask Ollama to classify the transcript.
-    Returns 'entertainment', 'keep', or None if Ollama is unreachable.
-    """
     prompt = (
         'Classify the audio transcript below as exactly one word:\n'
-        '"entertainment" — if it is from gaming, a sitcom, movie, TV show, or scripted fiction.\n'
-        '"informative" — if it is a tutorial, educational video, news, documentary, how-to, or real conversation.\n\n'
+        '"entertainment" — gaming, sitcom, movie, TV show, or scripted fiction.\n'
+        '"informative" — tutorial, educational video, news, documentary, how-to, or real conversation.\n\n'
         f'Transcript: """{text[:400]}"""\n\n'
         'Reply with one word only (entertainment or informative):'
     )
@@ -171,38 +102,16 @@ async def _classify_with_ollama(text: str) -> Optional[str]:
             resp.raise_for_status()
             answer = resp.json().get("response", "").strip().lower()
             if "entertainment" in answer:
+                logger.info(f"[FILTER] Ollama → entertainment")
                 return "entertainment"
             if "informative" in answer:
+                logger.info(f"[FILTER] Ollama → informative (keep)")
                 return "keep"
-            logger.warning(f"[FILTER] Ollama gave unclear answer: {answer!r} — falling back to keywords")
-            return None
+            logger.warning(f"[FILTER] Ollama unclear answer: {answer!r} — keeping chunk")
+            return "keep"
     except Exception as e:
-        logger.warning(f"[FILTER] Ollama unreachable ({e}) — falling back to keywords")
-        return None
-
-
-async def classify_content(text: str) -> str:
-    """
-    Orchestrates classification:
-      1. Skip if filter disabled or text empty
-      2. Try Ollama if enabled (most accurate)
-      3. Fall back to keyword classifier
-      4. Default: keep (never drop when unsure)
-    """
-    if not CONTENT_FILTER_ENABLED or not text.strip():
+        logger.warning(f"[FILTER] Ollama unreachable ({e}) — keeping chunk")
         return "keep"
-
-    if OLLAMA_ENABLED:
-        result = await _classify_with_ollama(text)
-        if result is not None:
-            logger.info(f"[FILTER] Ollama classified as: {result}")
-            return result
-
-    result = _classify_with_keywords(text)
-    if result == "unknown":
-        return "keep"
-    logger.info(f"[FILTER] Keywords classified as: {result}")
-    return result
 
 # ---------------------------------------------------------------------------
 # Load models
@@ -489,22 +398,6 @@ async def get_filter():
             "model": OLLAMA_MODEL,
             "timeout_seconds": OLLAMA_TIMEOUT,
         },
-        "block_keywords": _user_block,
-        "allow_keywords": _user_allow,
-        "block_file": str(FILTER_DIR / "block_keywords.txt"),
-        "allow_file": str(FILTER_DIR / "allow_keywords.txt"),
-    }
-
-
-@app.post("/filter/reload")
-async def reload_filter():
-    """Reload block/allow keyword files without restarting the server."""
-    global _user_block, _user_allow
-    _user_block, _user_allow = _load_filter_lists()
-    return {
-        "status": "reloaded",
-        "block_count": len(_user_block),
-        "allow_count": len(_user_allow),
     }
 
 
