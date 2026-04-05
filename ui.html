@@ -124,6 +124,38 @@ h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
 .ollama-keep { color: #3fb950; }
 .ollama-ent  { color: #f85149; }
 
+/* Detail sub-rows (input text + scores) */
+.detail {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.detail-input {
+  color: #6e7681;
+  font-size: 11px;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detail-input::before { content: "↳ "; color: #444c56; }
+.detail-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+}
+.score-item { color: #6e7681; }
+.score-item .score-label { color: #8b949e; }
+.score-item.score-top .score-label { color: #e6edf3; }
+.score-item.score-top .score-pct   { font-weight: 600; }
+.detail-raw {
+  font-size: 11px;
+  color: #6e7681;
+}
+.detail-raw::before { content: "↳ raw: "; color: #444c56; }
+
 /* Transcript rows */
 .speaker { color: #bc8cff; font-weight: 600; margin-right: 4px; }
 .text    { color: #e6edf3; }
@@ -207,21 +239,48 @@ function onTranscribed(ev) {
 }
 
 function onNliResult(ev) {
-  const pct  = Math.round(ev.confidence * 100);
-  const cls  = ev.confident
+  const pct = Math.round(ev.confidence * 100);
+  const cls = ev.confident
     ? (ev.decision === 'entertainment' ? 'nli-ent' : 'nli-keep')
     : 'nli-uncertain';
-  const esc  = !ev.confident ? '<span class="escalated">→ Ollama</span>' : '';
+  const esc = !ev.confident ? '<span class="escalated">→ Ollama</span>' : '';
+
+  // Score pills — short label (first 28 chars)
+  const scorePills = (ev.scores || []).map((s, i) => {
+    const short = s.label.length > 28 ? s.label.slice(0, 28) + '…' : s.label;
+    const pct2  = Math.round(s.score * 100);
+    return `<span class="score-item${i === 0 ? ' score-top' : ''}">` +
+           `<span class="score-label">${short}</span>` +
+           `<span class="score-pct"> ${pct2}%</span></span>`;
+  }).join('');
+
+  const inputLine = ev.input_text
+    ? `<div class="detail-input">${ev.input_text.slice(0, 120)}</div>`
+    : '';
+
   addRow(ev.chunk_id, 'NLI',
-    `<span class="${cls}">${ev.decision}</span>`+
-    `<span class="conf">${pct}%</span>${esc}`
+    `<span class="${cls}">${ev.decision}</span>` +
+    `<span class="conf">${pct}%</span>${esc}` +
+    `<div class="detail">` +
+      `<div class="detail-scores">${scorePills}</div>` +
+      inputLine +
+    `</div>`
   );
 }
 
 function onOllamaResult(ev) {
   const cls = ev.decision === 'entertainment' ? 'ollama-ent' : 'ollama-keep';
+
+  const inputLine = ev.input_text
+    ? `<div class="detail-input">${ev.input_text.slice(0, 120)}</div>`
+    : '';
+  const rawLine = ev.raw_response
+    ? `<div class="detail-raw">${ev.raw_response}</div>`
+    : '';
+
   addRow(ev.chunk_id, 'ollama',
-    `<span class="${cls}">${ev.decision}</span>`
+    `<span class="${cls}">${ev.decision}</span>` +
+    `<div class="detail">${rawLine}${inputLine}</div>`
   );
 }
 

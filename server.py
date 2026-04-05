@@ -4,6 +4,7 @@ import tempfile
 import os
 import asyncio
 import logging
+import time
 from uuid import uuid4
 import numpy as np
 import torch
@@ -21,6 +22,41 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# ntfy.sh alerts
+# ---------------------------------------------------------------------------
+NTFY_URL   = os.environ.get("NTFY_URL",   "https://ntfy.sh/ntfy-homeass-uptimekuma-topic")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
+
+# Simple rate-limiter: suppress identical alert titles within this window (seconds)
+_NTFY_COOLDOWN = 120
+_ntfy_last_sent: dict[str, float] = {}
+
+
+async def notify(title: str, message: str, priority: str = "default", tags: str = "warning") -> None:
+    """Fire-and-forget push to ntfy.sh. Suppresses duplicate titles within cooldown."""
+    if not NTFY_TOKEN:
+        return
+    now = time.monotonic()
+    last = _ntfy_last_sent.get(title, 0)
+    if now - last < _NTFY_COOLDOWN:
+        return
+    _ntfy_last_sent[title] = now
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(
+                NTFY_URL,
+                content=message.encode(),
+                headers={
+                    "Authorization": f"Bearer {NTFY_TOKEN}",
+                    "Title": title,
+                    "Priority": priority,
+                    "Tags": tags,
+                },
+            )
+    except Exception as e:
+        logger.warning(f"[NTFY] Failed to send alert: {e}")
 
 # ---------------------------------------------------------------------------
 # SSE — live dashboard event bus
@@ -107,16 +143,21 @@ _NLI_LABELS = [
 ]
 
 
-def _classify_with_nli(text: str) -> tuple[str, float]:
+def _classify_with_nli(text: str) -> tuple[str, float, list]:
     """
-    Runs zero-shot NLI. Returns (decision, confidence).
+    Runs zero-shot NLI. Returns (decision, confidence, scores).
     decision is 'entertainment' or 'keep'.
+    scores is a list of {label, score} for all candidate labels.
     """
     result = nli_pipeline(text[:400], candidate_labels=_NLI_LABELS)
     top_label: str = result["labels"][0]
     top_score: float = result["scores"][0]
     decision = "entertainment" if top_label == _NLI_LABELS[0] else "keep"
-    return decision, top_score
+    scores = [
+        {"label": l, "score": round(s, 3)}
+        for l, s in zip(result["labels"], result["scores"])
+    ]
+    return decision, top_score, scores
 
 
 async def _classify_with_ollama(text: str) -> str:
@@ -136,19 +177,32 @@ async def _classify_with_ollama(text: str) -> str:
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
             )
+            if resp.status_code == 429:
+                await notify("Ollama rate-limited (429)", f"Model: {OLLAMA_MODEL}\nURL: {OLLAMA_URL}", priority="high", tags="rotating_light")
+                logger.warning("[FILTER] Ollama 429 — keeping chunk")
+                return "keep"
             resp.raise_for_status()
             answer = resp.json().get("response", "").strip().lower()
             if "entertainment" in answer:
                 logger.info("[FILTER] Ollama → entertainment")
-                return "entertainment"
+                return "entertainment", answer
             if "informative" in answer:
                 logger.info("[FILTER] Ollama → informative (keep)")
-                return "keep"
+                return "keep", answer
             logger.warning(f"[FILTER] Ollama unclear: {answer!r} — keeping chunk")
-            return "keep"
-    except Exception as e:
+            return "keep", answer
+    except httpx.ConnectError as e:
+        await notify("Ollama unreachable", f"Cannot connect to {OLLAMA_URL}\n{e}", priority="high", tags="no_entry")
         logger.warning(f"[FILTER] Ollama unreachable ({e}) — keeping chunk")
-        return "keep"
+        return "keep", "unreachable"
+    except httpx.TimeoutException as e:
+        await notify("Ollama timeout", f"No response within {OLLAMA_TIMEOUT}s from {OLLAMA_URL}", tags="hourglass_flowing_sand")
+        logger.warning(f"[FILTER] Ollama timeout ({e}) — keeping chunk")
+        return "keep", "timeout"
+    except Exception as e:
+        await notify("Ollama error", f"{type(e).__name__}: {e}", priority="high", tags="x")
+        logger.warning(f"[FILTER] Ollama error ({e}) — keeping chunk")
+        return "keep", f"error: {e}"
 
 
 async def classify_content(text: str, chunk_id: str) -> str:
@@ -164,7 +218,12 @@ async def classify_content(text: str, chunk_id: str) -> str:
 
     # Tier 1: NLI
     if NLI_ENABLED and nli_pipeline is not None:
-        decision, confidence = await asyncio.to_thread(_classify_with_nli, text)
+        try:
+            decision, confidence, scores = await asyncio.to_thread(_classify_with_nli, text)
+        except Exception as e:
+            await notify("NLI classifier failed", f"{type(e).__name__}: {e}", priority="high", tags="x")
+            logger.error(f"[FILTER] NLI failed ({e}) — skipping to Ollama")
+            decision, confidence, scores = "keep", 0.0, []
         confident = confidence >= NLI_THRESHOLD
         logger.info(f"[FILTER] NLI → {decision} ({confidence:.2f}) confident={confident}")
         emit_event("nli_result", {
@@ -172,6 +231,8 @@ async def classify_content(text: str, chunk_id: str) -> str:
             "decision": decision,
             "confidence": round(confidence, 3),
             "confident": confident,
+            "input_text": text[:200],
+            "scores": scores,
         })
         if confident:
             return decision
@@ -179,8 +240,13 @@ async def classify_content(text: str, chunk_id: str) -> str:
 
     # Tier 2: Ollama
     if OLLAMA_ENABLED:
-        result = await _classify_with_ollama(text)
-        emit_event("ollama_result", {"chunk_id": chunk_id, "decision": result})
+        result, raw = await _classify_with_ollama(text)
+        emit_event("ollama_result", {
+            "chunk_id": chunk_id,
+            "decision": result,
+            "input_text": text[:200],
+            "raw_response": raw,
+        })
         return result
 
     return "keep"
@@ -206,12 +272,25 @@ nli_pipeline = None
 if CONTENT_FILTER_ENABLED and NLI_ENABLED:
     from transformers import pipeline as hf_pipeline
     logger.info(f"Loading NLI classifier '{NLI_MODEL}' on {TORCH_DEVICE} ...")
-    nli_pipeline = hf_pipeline(
-        "zero-shot-classification",
-        model=NLI_MODEL,
-        device=TORCH_DEVICE,
-    )
-    logger.info("NLI classifier ready.")
+    try:
+        nli_pipeline = hf_pipeline(
+            "zero-shot-classification",
+            model=NLI_MODEL,
+            device=TORCH_DEVICE,
+        )
+        logger.info("NLI classifier ready.")
+    except Exception as _nli_err:
+        logger.error(f"NLI classifier failed to load: {_nli_err}")
+        # Send synchronously at startup (no event loop yet)
+        import threading
+        def _startup_alert():
+            import asyncio as _aio
+            _aio.run(notify(
+                "NLI failed to load",
+                f"Model: {NLI_MODEL}\n{type(_nli_err).__name__}: {_nli_err}",
+                priority="urgent", tags="x",
+            ))
+        threading.Thread(target=_startup_alert, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -349,14 +428,16 @@ async def inference(
 
     try:
         # Transcribe — always, all speakers
-        # initial_prompt primes Whisper for Hindi/English code-switching
-        result = model.transcribe(
-            audio_path,
-            language=language,
-            task="transcribe",
-            batch_size=BATCH_SIZE,
-            initial_prompt=INITIAL_PROMPT if not language else None,
-        )
+        try:
+            result = model.transcribe(
+                audio_path,
+                language=language,
+                task="transcribe",
+                batch_size=BATCH_SIZE,
+            )
+        except Exception as e:
+            await notify("Transcription failed", f"chunk #{chunk_id}\n{type(e).__name__}: {e}", priority="urgent", tags="rotating_light")
+            raise
         detected_lang = result.get("language", language or "hi")
 
         # Alignment: fall back to "hi" if detected language has no alignment model
