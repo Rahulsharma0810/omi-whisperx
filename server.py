@@ -234,15 +234,17 @@ async def _classify_with_ollama(text: str) -> str:
         try:
             async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{OLLAMA_URL}/api/generate",
-                    json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+                    f"{OLLAMA_URL}/api/chat",
+                    json={"model": OLLAMA_MODEL,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "stream": False},
                 )
                 if resp.status_code == 429:
                     await notify("Ollama rate-limited (429)", f"Model: {OLLAMA_MODEL}\nURL: {OLLAMA_URL}", priority="high", tags="rotating_light")
                     logger.warning("[FILTER] Ollama 429 — keeping chunk")
                     return "keep"
                 resp.raise_for_status()
-                answer = resp.json().get("response", "").strip().lower()
+                answer = resp.json().get("message", {}).get("content", "").strip().lower()
                 if "entertainment" in answer:
                     logger.info("[FILTER] Ollama → entertainment")
                     return "entertainment", answer
