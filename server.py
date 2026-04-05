@@ -5,6 +5,8 @@ import os
 import asyncio
 import logging
 import time
+import socket
+from urllib.parse import urlparse
 from uuid import uuid4
 import numpy as np
 import torch
@@ -185,6 +187,32 @@ _OLLAMA_RETRY_ATTEMPTS = 3
 _OLLAMA_RETRY_DELAY   = 2.0  # seconds between retries
 
 
+def _get_source_ip() -> str:
+    """Return the local IP this host uses to reach external networks."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "unknown"
+
+
+async def _tcp_probe(url: str, timeout: float = 3.0) -> bool:
+    """Return True if the host:port in *url* accepts a TCP connection."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
 async def _classify_with_ollama(text: str) -> str:
     """
     Calls Ollama. Returns 'entertainment', 'keep', or 'keep' on any failure.
@@ -239,18 +267,30 @@ async def _classify_with_ollama(text: str) -> str:
             logger.warning(f"[FILTER] Ollama error ({e}) — keeping chunk")
             return "keep", f"error: {e}"
 
-    # All retries exhausted for ConnectError / TimeoutException
+    # All retries exhausted for ConnectError / TimeoutException —
+    # do a lightweight TCP probe before alerting to avoid false positives.
+    source_ip = _get_source_ip()
+    reachable = await _tcp_probe(OLLAMA_URL)
+    if reachable:
+        logger.warning(
+            f"[FILTER] Ollama API failed after {_OLLAMA_RETRY_ATTEMPTS} attempts "
+            f"but TCP probe succeeded — skipping alert (transient issue resolved)"
+        )
+        return "keep", "unreachable"
+
     if last_exc_kind == "unreachable":
         await notify(
             "Ollama unreachable",
-            f"Cannot connect to {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts\n{last_exc}",
+            f"Cannot connect to {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts\n"
+            f"Source IP: {source_ip}\n{last_exc}",
             priority="high", tags="no_entry",
         )
         return "keep", "unreachable"
     else:
         await notify(
             "Ollama timeout",
-            f"No response within {OLLAMA_TIMEOUT}s from {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts",
+            f"No response within {OLLAMA_TIMEOUT}s from {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts\n"
+            f"Source IP: {source_ip}",
             tags="hourglass_flowing_sand",
         )
         return "keep", "timeout"
