@@ -164,6 +164,43 @@ Events emitted per chunk:
 | `filtered` | Chunk dropped | `chunk_id`, `preview` |
 | `transcript` | Chunk saved | `chunk_id`, `lang`, `duration`, `segments[]` |
 
+## Omi App Configuration
+
+**Public URL:** `https://baata.rvsharma.com` (Cloudflare tunnel → `localhost:8080`)
+Use this URL in the Omi app — not the local IP — so the pendant works away from home Wi-Fi.
+
+**Transcript Provider config:**
+```json
+{
+  "url": "https://baata.rvsharma.com/inference",
+  "request_type": "multipart_form",
+  "headers": null,
+  "params": {
+    "temperature": "0.0",
+    "response_format": "verbose_json"
+  },
+  "audio_field_name": "file"
+}
+```
+
+**Response Schema:**
+```json
+{
+  "segments_path": "segments",
+  "segments_text_field": "text",
+  "segments_start_field": "start",
+  "segments_end_field": "end",
+  "segments_speaker_field": "speaker",
+  "text_path": "text",
+  "default_segment_duration": 5.0
+}
+```
+
+Notes:
+- `temperature_inc` is a Whisper.cpp param — not supported here, do not add it
+- `language` param is optional — omit it to let Whisper auto-detect per chunk (best for Hinglish)
+- Adding `"language": "hi"` forces Hindi mode; `"language": "en"` forces English
+
 ## Speaker Enrollment
 
 Say the trigger phrase during a conversation:
