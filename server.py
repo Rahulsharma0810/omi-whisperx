@@ -163,9 +163,15 @@ def _classify_with_nli(text: str) -> tuple[str, float, list]:
     return decision, top_score, scores
 
 
+_OLLAMA_RETRY_ATTEMPTS = 3
+_OLLAMA_RETRY_DELAY   = 2.0  # seconds between retries
+
+
 async def _classify_with_ollama(text: str) -> str:
     """
     Calls Ollama. Returns 'entertainment', 'keep', or 'keep' on any failure.
+    Retries up to _OLLAMA_RETRY_ATTEMPTS times on transient ConnectError /
+    TimeoutException before sending an ntfy alert.
     """
     prompt = (
         'Classify the audio transcript below as exactly one word:\n'
@@ -174,38 +180,62 @@ async def _classify_with_ollama(text: str) -> str:
         f'Transcript: """{text[:400]}"""\n\n'
         'Reply with one word only (entertainment or informative):'
     )
-    try:
-        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            )
-            if resp.status_code == 429:
-                await notify("Ollama rate-limited (429)", f"Model: {OLLAMA_MODEL}\nURL: {OLLAMA_URL}", priority="high", tags="rotating_light")
-                logger.warning("[FILTER] Ollama 429 — keeping chunk")
-                return "keep"
-            resp.raise_for_status()
-            answer = resp.json().get("response", "").strip().lower()
-            if "entertainment" in answer:
-                logger.info("[FILTER] Ollama → entertainment")
-                return "entertainment", answer
-            if "informative" in answer:
-                logger.info("[FILTER] Ollama → informative (keep)")
+
+    last_exc: Exception | None = None
+    last_exc_kind: str = ""
+
+    for attempt in range(1, _OLLAMA_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+                )
+                if resp.status_code == 429:
+                    await notify("Ollama rate-limited (429)", f"Model: {OLLAMA_MODEL}\nURL: {OLLAMA_URL}", priority="high", tags="rotating_light")
+                    logger.warning("[FILTER] Ollama 429 — keeping chunk")
+                    return "keep"
+                resp.raise_for_status()
+                answer = resp.json().get("response", "").strip().lower()
+                if "entertainment" in answer:
+                    logger.info("[FILTER] Ollama → entertainment")
+                    return "entertainment", answer
+                if "informative" in answer:
+                    logger.info("[FILTER] Ollama → informative (keep)")
+                    return "keep", answer
+                logger.warning(f"[FILTER] Ollama unclear: {answer!r} — keeping chunk")
                 return "keep", answer
-            logger.warning(f"[FILTER] Ollama unclear: {answer!r} — keeping chunk")
-            return "keep", answer
-    except httpx.ConnectError as e:
-        await notify("Ollama unreachable", f"Cannot connect to {OLLAMA_URL}\n{e}", priority="high", tags="no_entry")
-        logger.warning(f"[FILTER] Ollama unreachable ({e}) — keeping chunk")
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            last_exc = e
+            last_exc_kind = "unreachable" if isinstance(e, httpx.ConnectError) else "timeout"
+            if attempt < _OLLAMA_RETRY_ATTEMPTS:
+                logger.warning(
+                    f"[FILTER] Ollama {last_exc_kind} (attempt {attempt}/{_OLLAMA_RETRY_ATTEMPTS}), "
+                    f"retrying in {_OLLAMA_RETRY_DELAY}s…"
+                )
+                await asyncio.sleep(_OLLAMA_RETRY_DELAY)
+            else:
+                logger.warning(f"[FILTER] Ollama {last_exc_kind} after {_OLLAMA_RETRY_ATTEMPTS} attempts — keeping chunk")
+        except Exception as e:
+            await notify("Ollama error", f"{type(e).__name__}: {e}", priority="high", tags="x")
+            logger.warning(f"[FILTER] Ollama error ({e}) — keeping chunk")
+            return "keep", f"error: {e}"
+
+    # All retries exhausted for ConnectError / TimeoutException
+    if last_exc_kind == "unreachable":
+        await notify(
+            "Ollama unreachable",
+            f"Cannot connect to {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts\n{last_exc}",
+            priority="high", tags="no_entry",
+        )
         return "keep", "unreachable"
-    except httpx.TimeoutException as e:
-        await notify("Ollama timeout", f"No response within {OLLAMA_TIMEOUT}s from {OLLAMA_URL}", tags="hourglass_flowing_sand")
-        logger.warning(f"[FILTER] Ollama timeout ({e}) — keeping chunk")
+    else:
+        await notify(
+            "Ollama timeout",
+            f"No response within {OLLAMA_TIMEOUT}s from {OLLAMA_URL} after {_OLLAMA_RETRY_ATTEMPTS} attempts",
+            tags="hourglass_flowing_sand",
+        )
         return "keep", "timeout"
-    except Exception as e:
-        await notify("Ollama error", f"{type(e).__name__}: {e}", priority="high", tags="x")
-        logger.warning(f"[FILTER] Ollama error ({e}) — keeping chunk")
-        return "keep", f"error: {e}"
 
 
 async def classify_content(text: str, chunk_id: str) -> str:
