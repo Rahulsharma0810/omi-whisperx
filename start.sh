@@ -4,6 +4,13 @@ set -e
 SCRIPT_DIR="${0:A:h}"
 VENV="$HOME/.venvs/whisperx"
 
+# Load .env if present (does not override vars already set in the environment)
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  set -o allexport
+  source "$SCRIPT_DIR/.env"
+  set +o allexport
+fi
+
 # First-time setup
 if [[ ! -d "$VENV" ]]; then
   echo "Creating venv at $VENV ..."
