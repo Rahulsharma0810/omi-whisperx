@@ -62,6 +62,94 @@ CAPTURE_TRIGGER = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Content filter — drops entertainment chunks so Omi doesn't save them
+# ---------------------------------------------------------------------------
+CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "true").lower() == "true"
+FILTER_DIR = Path(os.environ.get("FILTER_DIR", "~/.omi")).expanduser()
+
+# Built-in entertainment signals (need ≥2 hits to trigger, avoids false positives)
+_ENTERTAINMENT_SIGNALS: list[str] = [
+    # Red Dead Redemption 2
+    "arthur morgan", "dutch van der linde", "hosea matthews", "micah bell",
+    "javier escuella", "john marston", "red dead redemption",
+    "blackwater", "saint denis", "strawberry", "valentine",
+    # Hitman / Agent 47
+    "agent 47", "diana burnwood", "elusive target", "silent assassin",
+    "contracts mode",
+    # Generic game-mechanics phrases
+    "mission failed", "mission complete", "mission passed",
+    "game over", "respawn", "checkpoint reached",
+    "achievement unlocked", "press x to", "press a to",
+    "health regenerating", "wanted level",
+    "new objective", "follow the marker",
+]
+
+# Informative / educational signals — ≥2 hits keep the chunk regardless
+_INFORMATIVE_SIGNALS: list[str] = [
+    "in this video", "in today's video", "in this tutorial",
+    "let me show you", "let me explain", "let me walk you through",
+    "how to", "step by step", "the reason why", "which means that",
+    "in other words", "for example", "for instance",
+    "according to", "research shows", "studies show",
+    "the key takeaway", "important point",
+    "next step", "let's dive into", "let's talk about",
+    "tutorial", "explained", "guide", "tips and tricks",
+    "if you found this helpful", "hope this helps",
+]
+
+
+def _load_keyword_file(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [
+        line.strip().lower()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+
+def _load_filter_lists() -> tuple[list[str], list[str]]:
+    block = _load_keyword_file(FILTER_DIR / "block_keywords.txt")
+    allow = _load_keyword_file(FILTER_DIR / "allow_keywords.txt")
+    if block:
+        logger.info(f"Loaded {len(block)} custom block keywords")
+    if allow:
+        logger.info(f"Loaded {len(allow)} custom allow keywords")
+    return block, allow
+
+
+_user_block, _user_allow = _load_filter_lists()
+
+
+def classify_content(text: str) -> str:
+    """
+    Returns 'entertainment' if the transcript is gaming/scripted fiction,
+    otherwise 'keep'. Default is always 'keep' when ambiguous.
+    """
+    if not CONTENT_FILTER_ENABLED or not text.strip():
+        return "keep"
+
+    t = text.lower()
+
+    # User allow-list overrides everything (e.g. "RDR2 speedrun tips")
+    if any(kw in t for kw in _user_allow):
+        return "keep"
+
+    # ≥2 informative signals → educational content, keep regardless
+    if sum(1 for s in _INFORMATIVE_SIGNALS if s in t) >= 2:
+        return "keep"
+
+    # Hard block from user-defined file
+    if any(kw in t for kw in _user_block):
+        return "entertainment"
+
+    # ≥2 built-in entertainment signals → filter
+    if sum(1 for s in _ENTERTAINMENT_SIGNALS if s in t) >= 2:
+        return "entertainment"
+
+    return "keep"
+
+# ---------------------------------------------------------------------------
 # Load models
 # ---------------------------------------------------------------------------
 logger.info(
@@ -261,6 +349,18 @@ async def inference(
         full_text = " ".join(s.get("text", "").strip() for s in segments)
         duration = float(segments[-1]["end"]) if segments else 0.0
 
+        # Content filter: drop entertainment chunks — Omi won't save empty segments
+        content_class = classify_content(full_text)
+        if content_class == "entertainment":
+            logger.info(f"[FILTER] Dropped entertainment content: {full_text[:120]!r}")
+            return JSONResponse({
+                "task": "transcribe",
+                "language": detected_lang,
+                "duration": 0.0,
+                "text": "",
+                "segments": [],
+            })
+
         formatted_segments = [
             {
                 "id": i,
@@ -324,6 +424,29 @@ async def reset_all():
     return JSONResponse({"status": "reset"})
 
 
+@app.get("/filter")
+async def get_filter():
+    return {
+        "enabled": CONTENT_FILTER_ENABLED,
+        "block_keywords": _user_block,
+        "allow_keywords": _user_allow,
+        "block_file": str(FILTER_DIR / "block_keywords.txt"),
+        "allow_file": str(FILTER_DIR / "allow_keywords.txt"),
+    }
+
+
+@app.post("/filter/reload")
+async def reload_filter():
+    """Reload block/allow keyword files without restarting the server."""
+    global _user_block, _user_allow
+    _user_block, _user_allow = _load_filter_lists()
+    return {
+        "status": "reloaded",
+        "block_count": len(_user_block),
+        "allow_count": len(_user_allow),
+    }
+
+
 @app.get("/health")
 async def health():
     return {
@@ -332,4 +455,5 @@ async def health():
         "named_speakers": list(named_speakers.keys()),
         "capture_pending": capture_pending,
         "speaker_threshold": SPEAKER_THRESHOLD,
+        "content_filter": CONTENT_FILTER_ENABLED,
     }
