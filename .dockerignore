@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+start.sh
+cloudflared-config.yml
+agents.md
+*.json
+*.wav
+*.mp3

@@ -127,6 +127,49 @@ Say the trigger phrase during a conversation:
 
 The next unrecognised speaker in that chunk is enrolled as NAME and saved to `PROFILES_DIR`.
 
+## Docker / Portainer
+
+The CI builds a multi-arch image (`linux/amd64` + `linux/arm64`) on every push to `main`
+and pushes it to GHCR:
+
+```
+ghcr.io/rahulsharma0810/omi-whisperx:latest
+```
+
+**First-time setup:** After the first CI run, go to
+`github.com/Rahulsharma0810` → Packages → `omi-whisperx` → Package settings → **Make public**
+so Portainer can pull without credentials.
+
+**Portainer stack (docker-compose):**
+
+```yaml
+version: "3.9"
+services:
+  omi-whisperx:
+    image: ghcr.io/rahulsharma0810/omi-whisperx:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      HF_TOKEN: your_token_here
+      WHISPER_MODEL: medium        # tiny/base/small/medium/large-v2
+      WHISPER_BATCH_SIZE: "4"      # lower on RPi5 to save RAM
+      SPEAKER_THRESHOLD: "0.80"
+    volumes:
+      - omi_data:/data             # model cache + speaker profiles
+volumes:
+  omi_data:
+```
+
+**Key files:**
+- `Dockerfile` — multi-arch build, installs CPU-only torch on arm64
+- `.github/workflows/docker.yml` — triggers on changes to server.py, requirements.txt, or Dockerfile
+- `/data/huggingface` — HuggingFace model cache (mount a volume — models are ~2–4 GB)
+- `/data/speakers` — speaker embedding profiles (persistent)
+
+Models are **not** baked into the image. They download on first container start (~5 min).
+Subsequent starts are fast once the volume is populated.
+
 ## Do Not
 
 - Add MPS support to the whisperx transcription call — CTranslate2 does not support it
