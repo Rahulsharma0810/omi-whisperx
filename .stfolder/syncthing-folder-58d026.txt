@@ -1,5 +1,0 @@
-# This directory is a Syncthing folder marker.
-# Do not delete.
-
-folderID: sync-omi-whisperx
-created: 2026-04-02T13:54:01+05:30
