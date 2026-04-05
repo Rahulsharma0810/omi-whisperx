@@ -27,8 +27,7 @@ header {
   background: #161b22;
 }
 h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
-
-nav { margin-left: auto; display: flex; gap: 16px; }
+nav { margin-left: auto; display: flex; gap: 10px; }
 nav a {
   color: #8b949e; font-size: 11px; text-decoration: none;
   padding: 2px 8px; border-radius: 4px; border: 1px solid #21262d;
@@ -37,7 +36,7 @@ nav a:hover { color: #e6edf3; border-color: #444c56; }
 
 /* ── Form ── */
 .form-section {
-  padding: 16px;
+  padding: 14px 16px;
   border-bottom: 1px solid #21262d;
   background: #0d1117;
   display: flex;
@@ -49,79 +48,87 @@ nav a:hover { color: #e6edf3; border-color: #444c56; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { color: #8b949e; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
 
-select, input[type="number"], input[type="text"] {
-  background: #161b22;
-  border: 1px solid #30363d;
-  color: #e6edf3;
-  font-family: inherit;
-  font-size: 12px;
-  padding: 5px 8px;
-  border-radius: 4px;
-  width: 100px;
+select, input[type="number"] {
+  background: #161b22; border: 1px solid #30363d;
+  color: #e6edf3; font-family: inherit; font-size: 12px;
+  padding: 5px 8px; border-radius: 4px;
 }
-select { width: 120px; }
+select { width: 110px; }
+input[type="number"] { width: 80px; }
 
-.checks { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.checks label {
-  display: flex; gap: 5px; align-items: center;
-  color: #8b949e; font-size: 11px; cursor: pointer;
+/* Audio source */
+.source-group { display: flex; gap: 0; border: 1px solid #30363d; border-radius: 4px; overflow: hidden; }
+.source-btn {
+  background: #161b22; border: none; color: #8b949e;
+  font-family: inherit; font-size: 11px; padding: 5px 12px; cursor: pointer;
+  border-right: 1px solid #30363d;
 }
+.source-btn:last-child { border-right: none; }
+.source-btn.active { background: #1f3a5f; color: #58a6ff; }
+.source-btn:hover:not(.active) { background: #21262d; color: #e6edf3; }
+
+/* Upload area */
+.upload-area {
+  border: 1px dashed #30363d; border-radius: 4px;
+  padding: 8px 14px; cursor: pointer; font-size: 11px; color: #8b949e;
+  display: flex; align-items: center; gap: 8px; min-width: 180px;
+  transition: border-color 0.2s;
+}
+.upload-area:hover, .upload-area.drag { border-color: #58a6ff; color: #58a6ff; }
+.upload-area .filename { color: #3fb950; }
+input[type="file"] { display: none; }
+
+/* Record area */
+.record-area { display: flex; align-items: center; gap: 10px; }
+.rec-btn {
+  background: #161b22; border: 1px solid #30363d;
+  color: #e6edf3; font-family: inherit; font-size: 11px;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+}
+.rec-btn:hover { border-color: #f85149; }
+.rec-btn.recording { background: #3d1a1a; border-color: #f85149; color: #f85149; }
+.rec-dot { width: 7px; height: 7px; border-radius: 50%; background: #f85149; }
+.rec-dot.pulse { animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.rec-timer { font-size: 12px; color: #8b949e; font-variant-numeric: tabular-nums; }
+.rec-timer.active { color: #f85149; }
+.rec-ready { font-size: 11px; color: #3fb950; }
+
+/* Skip checkboxes */
+.checks { display: flex; gap: 10px; flex-wrap: wrap; }
+.checks label { display: flex; gap: 5px; align-items: center; color: #8b949e; font-size: 11px; cursor: pointer; }
 input[type="checkbox"] { accent-color: #58a6ff; }
 
+/* Run + status */
 button#run-btn {
-  background: #238636;
-  color: #fff;
-  border: none;
-  padding: 6px 18px;
-  border-radius: 4px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  letter-spacing: 0.3px;
+  background: #238636; color: #fff; border: none;
+  padding: 6px 18px; border-radius: 4px;
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  cursor: pointer; letter-spacing: 0.3px;
 }
 button#run-btn:hover { background: #2ea043; }
 button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; }
-
-#status {
-  font-size: 11px;
-  color: #6e7681;
-  align-self: center;
-}
+#status { font-size: 11px; color: #6e7681; align-self: center; }
 #status.running { color: #d29922; }
 #status.done    { color: #3fb950; }
 #status.err     { color: #f85149; }
 
-/* ── Output feed ── */
+/* ── Output ── */
 #output {
-  flex: 1;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  flex: 1; padding: 12px 16px;
+  display: flex; flex-direction: column; gap: 14px;
   overflow-y: auto;
 }
 
-.sys-info {
-  color: #6e7681;
-  font-size: 11px;
-  line-height: 1.8;
-}
+.sys-info { color: #6e7681; font-size: 11px; line-height: 1.9; }
 .sys-info span { color: #8b949e; }
 .sys-info .val { color: #a5d6ff; }
 
-/* Trial block */
-.trial-block {
-  border: 1px solid #21262d;
-  border-radius: 6px;
-  overflow: hidden;
-}
+.trial-block { border: 1px solid #21262d; border-radius: 6px; overflow: hidden; }
 .trial-header {
-  background: #161b22;
-  padding: 5px 12px;
-  font-size: 11px;
-  color: #8b949e;
-  border-bottom: 1px solid #21262d;
+  background: #161b22; padding: 5px 12px;
+  font-size: 11px; color: #8b949e; border-bottom: 1px solid #21262d;
 }
 .trial-header .tn { color: #58a6ff; font-weight: 600; }
 
@@ -130,8 +137,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
   grid-template-columns: 130px 80px 80px 1fr;
   padding: 4px 12px;
   border-top: 1px solid #161b22;
-  font-size: 12px;
-  align-items: center;
+  font-size: 12px; align-items: center;
 }
 .stage-row:first-of-type { border-top: none; }
 .stage-name { color: #8b949e; }
@@ -141,60 +147,28 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 .rtf-ok   { color: #d29922; }
 .rtf-slow { color: #f85149; }
 .stage-bar-wrap { padding-left: 12px; }
-.stage-bar {
-  height: 4px;
-  border-radius: 2px;
-  background: #58a6ff;
-  min-width: 2px;
-  transition: width 0.3s;
-}
+.stage-bar { height: 4px; border-radius: 2px; background: #58a6ff; min-width: 2px; }
 .stage-row.total-row { border-top: 1px solid #21262d; }
-.stage-row.total-row .stage-name { color: #e6edf3; font-weight: 600; }
+.stage-row.total-row .stage-name,
 .stage-row.total-row .stage-elapsed { color: #e6edf3; font-weight: 600; }
 
-/* Summary table */
-.summary {
-  border: 1px solid #238636;
-  border-radius: 6px;
-  overflow: hidden;
-}
+.summary { border: 1px solid #238636; border-radius: 6px; overflow: hidden; }
 .summary-header {
-  background: #0f2d16;
-  padding: 6px 12px;
-  font-size: 11px;
-  color: #3fb950;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  border-bottom: 1px solid #238636;
+  background: #0f2d16; padding: 6px 12px;
+  font-size: 11px; color: #3fb950; font-weight: 600;
+  letter-spacing: 0.3px; border-bottom: 1px solid #238636;
 }
-.summary-grid {
-  display: grid;
-  grid-template-columns: 130px 80px 70px 70px 1fr;
-  font-size: 11px;
-}
+.summary-grid { display: grid; grid-template-columns: 130px 80px 70px 70px 1fr; font-size: 11px; }
 .summary-grid .hdr {
-  color: #6e7681;
-  padding: 4px 12px;
-  text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 0.4px;
+  color: #6e7681; padding: 4px 12px;
+  text-transform: uppercase; font-size: 10px; letter-spacing: 0.4px;
   border-bottom: 1px solid #21262d;
 }
-.summary-grid .cell {
-  padding: 4px 12px;
-  border-top: 1px solid #161b22;
-  color: #e6edf3;
-}
+.summary-grid .cell { padding: 4px 12px; border-top: 1px solid #161b22; color: #e6edf3; }
 .summary-grid .cell.dim { color: #8b949e; }
 .summary-grid .cell:first-child { color: #8b949e; }
 .summary-grid .total-cell { font-weight: 600; color: #e6edf3 !important; }
-
-.mem-info {
-  font-size: 11px;
-  color: #6e7681;
-  padding: 6px 12px;
-  border-top: 1px solid #21262d;
-}
+.mem-info { font-size: 11px; color: #6e7681; padding: 6px 12px; border-top: 1px solid #21262d; }
 .mem-info span { color: #a5d6ff; }
 </style>
 </head>
@@ -208,8 +182,48 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
   </nav>
 </header>
 
-<!-- Form -->
 <div class="form-section">
+
+  <!-- Audio source -->
+  <div class="field">
+    <label>Audio source</label>
+    <div class="source-group">
+      <button class="source-btn active" id="src-synth"  onclick="setSource('synthetic')">Synthetic</button>
+      <button class="source-btn"        id="src-upload" onclick="setSource('upload')">Upload</button>
+      <button class="source-btn"        id="src-record" onclick="setSource('record')">Record</button>
+    </div>
+  </div>
+
+  <!-- Synthetic: duration -->
+  <div class="field" id="field-duration">
+    <label>Duration (s)</label>
+    <input type="number" id="f-duration" value="30" min="5" max="120">
+  </div>
+
+  <!-- Upload -->
+  <div class="field" id="field-upload" style="display:none">
+    <label>Audio file</label>
+    <div class="upload-area" id="drop-zone" onclick="document.getElementById('f-file').click()"
+         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+      <span id="upload-label">Choose or drop WAV / MP3 / M4A…</span>
+    </div>
+    <input type="file" id="f-file" accept="audio/*" onchange="onFileSelected(event)">
+  </div>
+
+  <!-- Record -->
+  <div class="field" id="field-record" style="display:none">
+    <label>Microphone</label>
+    <div class="record-area">
+      <button class="rec-btn" id="rec-btn" onclick="toggleRecord()">
+        <div class="rec-dot" id="rec-dot"></div>
+        <span id="rec-label">Record</span>
+      </button>
+      <span class="rec-timer" id="rec-timer">0:00</span>
+      <span class="rec-ready" id="rec-ready" style="display:none">✓ ready</span>
+    </div>
+  </div>
+
+  <!-- Common params -->
   <div class="field">
     <label>Trials</label>
     <input type="number" id="f-trials" value="3" min="1" max="10">
@@ -223,10 +237,6 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
     </select>
   </div>
   <div class="field">
-    <label>Audio (s)</label>
-    <input type="number" id="f-duration" value="30" min="5" max="120">
-  </div>
-  <div class="field">
     <label>Skip stages</label>
     <div class="checks">
       <label><input type="checkbox" id="f-no-align"> alignment</label>
@@ -234,6 +244,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
       <label><input type="checkbox" id="f-no-emb"> embedding</label>
     </div>
   </div>
+
   <button id="run-btn" onclick="runBenchmark()">Run</button>
   <span id="status">idle</span>
 </div>
@@ -241,14 +252,107 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 <div id="output"></div>
 
 <script>
+// ── State ────────────────────────────────────────────────────────────────────
+let audioSource  = 'synthetic';   // 'synthetic' | 'upload' | 'record'
+let uploadedFile = null;
+let recordedBlob = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recTimerInterval = null;
+let recSeconds = 0;
+let es = null;
+let lastStageMax = 1;
+
 const output   = document.getElementById('output');
 const runBtn   = document.getElementById('run-btn');
 const statusEl = document.getElementById('status');
 
-let es = null;
-let currentTrial = null;  // DOM element for current trial block
-let lastStageMax = 1;     // for bar scaling within a trial
+// ── Source switcher ──────────────────────────────────────────────────────────
+function setSource(src) {
+  audioSource = src;
+  ['synthetic','upload','record'].forEach(s => {
+    document.getElementById('src-' + s).classList.toggle('active', s === src);
+  });
+  document.getElementById('field-duration').style.display = src === 'synthetic' ? '' : 'none';
+  document.getElementById('field-upload').style.display   = src === 'upload'    ? '' : 'none';
+  document.getElementById('field-record').style.display   = src === 'record'    ? '' : 'none';
+}
 
+// ── File upload ──────────────────────────────────────────────────────────────
+function onFileSelected(e) {
+  uploadedFile = e.target.files[0];
+  if (uploadedFile) {
+    document.getElementById('upload-label').innerHTML =
+      `<span class="filename">${uploadedFile.name}</span>`;
+  }
+}
+function onDragOver(e)  { e.preventDefault(); document.getElementById('drop-zone').classList.add('drag'); }
+function onDragLeave(e) { document.getElementById('drop-zone').classList.remove('drag'); }
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (f) {
+    uploadedFile = f;
+    document.getElementById('upload-label').innerHTML =
+      `<span class="filename">${f.name}</span>`;
+  }
+}
+
+// ── Microphone recording ─────────────────────────────────────────────────────
+async function toggleRecord() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+  } else {
+    await startRecording();
+  }
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedBlob  = null;
+    recordedChunks = [];
+    recSeconds    = 0;
+    document.getElementById('rec-ready').style.display = 'none';
+
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+      document.getElementById('rec-ready').style.display = '';
+      clearInterval(recTimerInterval);
+    };
+    mediaRecorder.start(100);
+
+    document.getElementById('rec-btn').classList.add('recording');
+    document.getElementById('rec-dot').classList.add('pulse');
+    document.getElementById('rec-label').textContent = 'Stop';
+
+    recTimerInterval = setInterval(() => {
+      recSeconds++;
+      const m = Math.floor(recSeconds / 60);
+      const s = String(recSeconds % 60).padStart(2, '0');
+      const el = document.getElementById('rec-timer');
+      el.textContent = `${m}:${s}`;
+      el.classList.add('active');
+    }, 1000);
+  } catch (err) {
+    setStatus('mic error: ' + err.message, 'err');
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  document.getElementById('rec-btn').classList.remove('recording');
+  document.getElementById('rec-dot').classList.remove('pulse');
+  document.getElementById('rec-label').textContent = 'Record';
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 function setStatus(msg, cls) {
   statusEl.textContent = msg;
   statusEl.className = cls || '';
@@ -260,8 +364,7 @@ function rtfClass(rtf) {
   return 'rtf-slow';
 }
 
-// ── Handlers ────────────────────────────────────────────────────────────────
-
+// ── SSE handlers ─────────────────────────────────────────────────────────────
 function onBenchStart(ev) {
   output.innerHTML = '';
   lastStageMax = 1;
@@ -273,7 +376,7 @@ function onBenchStart(ev) {
     `<span>whisper</span> <span class="val">${s.whisper_device}/${s.compute_type}</span> &nbsp;` +
     `<span>torch</span> <span class="val">${s.torch_device}</span> &nbsp;` +
     `<span>batch</span> <span class="val">${s.batch_size}</span> &nbsp;` +
-    `<span>audio</span> <span class="val">${ev.audio_duration}s synthetic</span> &nbsp;` +
+    `<span>audio</span> <span class="val">${ev.audio_label} (${ev.audio_duration.toFixed(1)}s)</span> &nbsp;` +
     `<span>lang</span> <span class="val">${ev.language}</span>`;
   output.appendChild(div);
 }
@@ -285,17 +388,16 @@ function onTrialStart(ev) {
   block.id = `trial-${ev.trial}`;
   block.innerHTML = `<div class="trial-header"><span class="tn">Trial ${ev.trial}</span> / ${ev.total}</div>`;
   output.appendChild(block);
-  currentTrial = block;
   output.scrollTop = output.scrollHeight;
 }
 
 function onBenchStage(ev) {
   const block = document.getElementById(`trial-${ev.trial}`);
   if (!block) return;
-  const rtf = ev.elapsed / (parseFloat(document.getElementById('f-duration').value) || 30);
+  const dur = parseFloat(document.getElementById('f-duration').value) || 30;
+  const rtf = ev.elapsed / dur;
   if (ev.elapsed > lastStageMax) lastStageMax = ev.elapsed;
   const barWidth = Math.max(4, Math.round((ev.elapsed / lastStageMax) * 200));
-
   const row = document.createElement('div');
   row.className = 'stage-row';
   row.innerHTML =
@@ -310,7 +412,10 @@ function onBenchStage(ev) {
 function onTrialDone(ev) {
   const block = document.getElementById(`trial-${ev.trial}`);
   if (!block) return;
-  const dur = parseFloat(document.getElementById('f-duration').value) || 30;
+  // Use actual audio duration from bench_start event (stored on the block)
+  const dur = block.dataset.audioDuration
+    ? parseFloat(block.dataset.audioDuration)
+    : (parseFloat(document.getElementById('f-duration').value) || 30);
   const rtf = ev.total / dur;
   const row = document.createElement('div');
   row.className = 'stage-row total-row';
@@ -323,16 +428,18 @@ function onTrialDone(ev) {
   output.scrollTop = output.scrollHeight;
 }
 
+// Store actual duration on trial blocks when bench_start fires
+let _audioDuration = 30;
+const _onBenchStartOrig = onBenchStart;
+
 function onBenchComplete(ev) {
   runBtn.disabled = false;
   setStatus('done', 'done');
   if (es) { es.close(); es = null; }
 
-  const dur = parseFloat(document.getElementById('f-duration').value) || 30;
   const allStages = [...(ev.stages || [])];
   if (ev.total) allStages.push(ev.total);
 
-  // Header row
   let gridHtml =
     `<div class="hdr">stage</div><div class="hdr" style="text-align:right">mean(s)</div>` +
     `<div class="hdr" style="text-align:right">std(s)</div>` +
@@ -371,38 +478,51 @@ function onBenchError(ev) {
 }
 
 const HANDLERS = {
-  bench_start:       onBenchStart,
-  bench_trial_start: onTrialStart,
+  bench_start:       (ev) => { _audioDuration = ev.audio_duration; onBenchStart(ev); },
+  bench_trial_start: (ev) => {
+    onTrialStart(ev);
+    const b = document.getElementById(`trial-${ev.trial}`);
+    if (b) b.dataset.audioDuration = _audioDuration;
+  },
   bench_stage:       onBenchStage,
   bench_trial_done:  onTrialDone,
   bench_complete:    onBenchComplete,
   bench_error:       onBenchError,
 };
 
-// ── Run ─────────────────────────────────────────────────────────────────────
-
+// ── Run ──────────────────────────────────────────────────────────────────────
 async function runBenchmark() {
+  // Validate source
+  if (audioSource === 'upload' && !uploadedFile) {
+    setStatus('choose a file first', 'err'); return;
+  }
+  if (audioSource === 'record' && !recordedBlob) {
+    setStatus('record audio first', 'err'); return;
+  }
+
   runBtn.disabled = true;
   setStatus('starting…', 'running');
 
   const body = new FormData();
-  body.append('trials',        document.getElementById('f-trials').value);
-  body.append('language',      document.getElementById('f-lang').value);
-  body.append('duration',      document.getElementById('f-duration').value);
-  body.append('no_alignment',  document.getElementById('f-no-align').checked);
-  body.append('no_diarization',document.getElementById('f-no-diar').checked);
-  body.append('no_embedding',  document.getElementById('f-no-emb').checked);
+  body.append('trials',         document.getElementById('f-trials').value);
+  body.append('language',       document.getElementById('f-lang').value);
+  body.append('duration',       document.getElementById('f-duration').value);
+  body.append('no_alignment',   document.getElementById('f-no-align').checked);
+  body.append('no_diarization', document.getElementById('f-no-diar').checked);
+  body.append('no_embedding',   document.getElementById('f-no-emb').checked);
+
+  if (audioSource === 'upload' && uploadedFile) {
+    body.append('audio_file', uploadedFile, uploadedFile.name);
+  } else if (audioSource === 'record' && recordedBlob) {
+    const ext = recordedBlob.type.includes('mp4') ? 'm4a' : 'webm';
+    body.append('audio_file', recordedBlob, `recording.${ext}`);
+  }
 
   const resp = await fetch('/benchmark/run', { method: 'POST', body });
   const data = await resp.json();
-  if (data.error) {
-    setStatus(data.error, 'err');
-    runBtn.disabled = false;
-    return;
-  }
+  if (data.error) { setStatus(data.error, 'err'); runBtn.disabled = false; return; }
 
   setStatus('running…', 'running');
-
   if (es) es.close();
   es = new EventSource('/benchmark/events');
   es.onmessage = (e) => {
@@ -411,14 +531,6 @@ async function runBenchmark() {
       const h = HANDLERS[ev.type];
       if (h) h(ev);
     } catch (_) {}
-  };
-  es.onerror = () => {
-    if (runBtn.disabled) {
-      // still running — reconnect
-      setTimeout(() => {
-        es = new EventSource('/benchmark/events');
-      }, 1000);
-    }
   };
 }
 </script>

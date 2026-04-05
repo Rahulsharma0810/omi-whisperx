@@ -624,14 +624,24 @@ def _ram_mb() -> float:
 
 
 async def _run_bench(trials: int, language: str, no_alignment: bool,
-                     no_diarization: bool, no_embedding: bool, duration: float) -> None:
+                     no_diarization: bool, no_embedding: bool,
+                     duration: float, provided_path: Optional[str] = None) -> None:
     global _bench_running
     audio_path = None
     try:
-        audio_path = await asyncio.to_thread(_generate_bench_audio, duration)
+        if provided_path:
+            audio_path = provided_path
+            try:
+                duration = sf.info(audio_path).duration
+            except Exception:
+                pass
+        else:
+            audio_path = await asyncio.to_thread(_generate_bench_audio, duration)
 
+        audio_label = Path(provided_path).name if provided_path else f"{duration:.0f}s synthetic"
         emit_bench("bench_start", {
             "trials": trials, "audio_duration": duration, "language": language or "auto",
+            "audio_label": audio_label,
             "system": {
                 "whisper_device": WHISPER_DEVICE, "compute_type": COMPUTE_TYPE,
                 "torch_device": TORCH_DEVICE, "model": MODEL_SIZE, "batch_size": BATCH_SIZE,
@@ -779,13 +789,25 @@ async def benchmark_run_endpoint(
     no_diarization: bool = Form(False),
     no_embedding: bool = Form(False),
     duration: float = Form(30.0),
+    audio_file: Optional[UploadFile] = File(None),
 ):
     global _bench_running
     if _bench_running:
         return JSONResponse({"error": "Benchmark already running"}, status_code=409)
     _bench_running = True
+
+    # Save uploaded audio to temp before the task starts (UploadFile closes after request)
+    provided_path = None
+    if audio_file and audio_file.filename:
+        suffix = Path(audio_file.filename).suffix or ".wav"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(await audio_file.read())
+        tmp.close()
+        provided_path = tmp.name
+
     asyncio.create_task(_run_bench(
-        trials, language, no_alignment, no_diarization, no_embedding, duration))
+        trials, language, no_alignment, no_diarization, no_embedding,
+        duration, provided_path))
     return JSONResponse({"status": "started"})
 
 
