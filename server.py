@@ -1,14 +1,16 @@
 import re
+import json
 import tempfile
 import os
 import asyncio
 import logging
+from uuid import uuid4
 import numpy as np
 import torch
 import httpx
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from typing import Optional
 import whisperx
 from whisperx.diarize import DiarizationPipeline, assign_word_speakers
@@ -19,6 +21,22 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# SSE — live dashboard event bus
+# ---------------------------------------------------------------------------
+_sse_clients: set[asyncio.Queue] = set()
+
+def emit_event(event_type: str, data: dict) -> None:
+    """Push an event to every connected dashboard client."""
+    payload = json.dumps({"type": event_type, **data})
+    dead = set()
+    for q in _sse_clients:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _sse_clients.difference_update(dead)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -133,12 +151,13 @@ async def _classify_with_ollama(text: str) -> str:
         return "keep"
 
 
-async def classify_content(text: str) -> str:
+async def classify_content(text: str, chunk_id: str) -> str:
     """
     Cascade classifier:
       Tier 1 — NLI: fast, local. If confident (≥ NLI_THRESHOLD) → done.
       Tier 2 — Ollama: only called when NLI is uncertain or disabled.
       Default → keep (never drop when unsure).
+    Emits live events to the dashboard at each stage.
     """
     if not CONTENT_FILTER_ENABLED or not text.strip():
         return "keep"
@@ -146,14 +165,23 @@ async def classify_content(text: str) -> str:
     # Tier 1: NLI
     if NLI_ENABLED and nli_pipeline is not None:
         decision, confidence = await asyncio.to_thread(_classify_with_nli, text)
-        logger.info(f"[FILTER] NLI → {decision} (confidence: {confidence:.2f})")
-        if confidence >= NLI_THRESHOLD:
+        confident = confidence >= NLI_THRESHOLD
+        logger.info(f"[FILTER] NLI → {decision} ({confidence:.2f}) confident={confident}")
+        emit_event("nli_result", {
+            "chunk_id": chunk_id,
+            "decision": decision,
+            "confidence": round(confidence, 3),
+            "confident": confident,
+        })
+        if confident:
             return decision
-        logger.info(f"[FILTER] NLI uncertain — escalating to Ollama")
+        logger.info("[FILTER] NLI uncertain — escalating to Ollama")
 
     # Tier 2: Ollama
     if OLLAMA_ENABLED:
-        return await _classify_with_ollama(text)
+        result = await _classify_with_ollama(text)
+        emit_event("ollama_result", {"chunk_id": chunk_id, "decision": result})
+        return result
 
     return "keep"
 
@@ -306,12 +334,18 @@ async def inference(
 ):
     global capture_pending
 
+    chunk_id = uuid4().hex[:8]
     audio_bytes = await file.read()
     suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio_bytes)
         audio_path = f.name
+
+    emit_event("audio_received", {
+        "chunk_id": chunk_id,
+        "size_kb": round(len(audio_bytes) / 1024, 1),
+    })
 
     try:
         # Transcribe — always, all speakers
@@ -336,6 +370,12 @@ async def inference(
         except Exception as e:
             logger.warning(f"Alignment failed for lang '{detected_lang}': {e} — skipping alignment")
             # segments still usable; just without word-level timestamps
+
+        emit_event("transcribed", {
+            "chunk_id": chunk_id,
+            "lang": detected_lang,
+            "segments": len(result.get("segments", [])),
+        })
 
         diarize_segments = diarize_model(audio_path)
         result = assign_word_speakers(diarize_segments, result)
@@ -370,9 +410,13 @@ async def inference(
         duration = float(segments[-1]["end"]) if segments else 0.0
 
         # Content filter: drop entertainment chunks — Omi won't save empty segments
-        content_class = await classify_content(full_text)
+        content_class = await classify_content(full_text, chunk_id)
         if content_class == "entertainment":
             logger.info(f"[FILTER] Dropped entertainment content: {full_text[:120]!r}")
+            emit_event("filtered", {
+                "chunk_id": chunk_id,
+                "preview": full_text[:80],
+            })
             return JSONResponse({
                 "task": "transcribe",
                 "language": detected_lang,
@@ -402,6 +446,17 @@ async def inference(
         for seg in formatted_segments:
             logger.info(f"[{seg['speaker']}] {seg['start']}-{seg['end']}s: {seg['text']}")
 
+        emit_event("transcript", {
+            "chunk_id": chunk_id,
+            "lang": detected_lang,
+            "duration": duration,
+            "segments": [
+                {"speaker": s["speaker"], "text": s["text"],
+                 "start": s["start"], "end": s["end"]}
+                for s in formatted_segments
+            ],
+        })
+
         return JSONResponse({
             "task": "transcribe",
             "language": detected_lang,
@@ -412,6 +467,34 @@ async def inference(
 
     finally:
         os.unlink(audio_path)
+
+
+@app.get("/ui", response_class=HTMLResponse)
+async def dashboard():
+    html_path = Path(__file__).parent / "ui.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/events")
+async def sse():
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _sse_clients.add(queue)
+
+    async def stream():
+        try:
+            while True:
+                payload = await queue.get()
+                yield f"data: {payload}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _sse_clients.discard(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/speakers")
