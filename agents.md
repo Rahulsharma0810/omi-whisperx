@@ -12,7 +12,8 @@ device via a Cloudflare tunnel.
 
 | File | Purpose |
 |---|---|
-| `server.py` | Main FastAPI app — all transcription, diarization, speaker logic, and API routes |
+| `server.py` | Main FastAPI app — transcription, diarization, speaker logic, content filter, SSE, API routes |
+| `ui.html` | Live monitoring dashboard — served at `/ui`, receives pipeline events via SSE |
 | `benchmark.py` | Standalone pipeline benchmark — times each stage, outputs RTF, supports `--compare` |
 | `start.sh` | Launches the server — sets env vars, activates venv, starts uvicorn on port 8080 |
 | `requirements.txt` | Python dependencies — do not add new packages without a strong reason |
@@ -25,13 +26,16 @@ Omi device → cloudflared tunnel → uvicorn (port 8080) → FastAPI
                                                           ├── /inference  (transcribe + diarize)
                                                           ├── /speakers   (list/delete profiles)
                                                           ├── /filter     (content filter status)
-                                                          └── /health     (model info)
+                                                          ├── /health     (model info)
+                                                          ├── /ui         (live dashboard HTML)
+                                                          └── /events     (SSE stream for dashboard)
 ```
 
 Models are loaded **once at startup** (not per request):
 - `whisperx.load_model` — transcription (CTranslate2, CPU+int8 or CUDA+float16)
 - `DiarizationPipeline` — speaker diarization (MPS on Apple Silicon, CPU on RPi5)
 - `VoiceEncoder` — speaker embeddings (always CPU — resemblyzer has no MPS support)
+- `transformers.pipeline("zero-shot-classification")` — NLI content filter (MPS/CUDA/CPU), only loaded when `CONTENT_FILTER=true` and `NLI_ENABLED=true`
 
 `load_align_model` is called **per request** because alignment model choice depends on detected language.
 
@@ -55,11 +59,18 @@ VoiceEncoder(device="cpu")
 |---|---|---|
 | `WHISPER_MODEL` | `medium` | Model size: tiny/base/small/medium/large-v2 |
 | `WHISPER_BATCH_SIZE` | `16` | Transcription batch size |
-| `SPEAKER_THRESHOLD` | `0.80` | Cosine similarity threshold for speaker name matching |
 | `WHISPER_INITIAL_PROMPT` | Hindi/English bilingual prompt | Primes Whisper for code-switching |
 | `HF_TOKEN` | — | HuggingFace token for diarization model download |
 | `PROFILES_DIR` | `~/.omi/speakers` | Speaker embedding storage directory |
-| `CONTENT_FILTER` | `true` | Set to `false` to disable entertainment content filtering |
+| `SPEAKER_THRESHOLD` | `0.80` | Cosine similarity threshold for speaker name matching |
+| `CONTENT_FILTER` | `true` | Set `false` to disable the entire content filter |
+| `NLI_ENABLED` | `true` | Enable zero-shot NLI classifier (Tier 1) |
+| `NLI_MODEL` | `typeform/distilbert-base-uncased-mnli` | HuggingFace zero-shot model |
+| `NLI_THRESHOLD` | `0.85` | Confidence cutoff — below this NLI escalates to Ollama |
+| `OLLAMA_ENABLED` | `false` | Enable Ollama fallback classifier (Tier 2) |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server address |
+| `OLLAMA_MODEL` | `gemma2:2b` | Ollama model name |
+| `OLLAMA_TIMEOUT` | `5` | Seconds before Ollama call is abandoned (returns keep) |
 
 ## Running Locally
 
@@ -100,25 +111,58 @@ RPi5 notes:
 
 ```
 POST /inference
+  0. Emit SSE            emit_event("audio_received")          → live dashboard
   1. Transcribe          model.transcribe(audio_path)         → segments + detected_lang
+     Emit SSE            emit_event("transcribed")
   2. Align               load_align_model() + whisperx.align() → word-level timestamps
   3. Diarize             diarize_model(audio_path)             → SPEAKER_00, SPEAKER_01 ...
   4. Assign speakers     assign_word_speakers()                → words labelled by speaker
   5. Embed               voice_encoder.embed_utterance()       → per-speaker numpy vectors
   6. Resolve names       cosine similarity vs stored profiles  → "Rahul" instead of SPEAKER_00
   7. Content filter      classify_content()                    → drop entertainment audio
+     Emit SSE            emit_event("nli_result" | "ollama_result" | "filtered" | "transcript")
   8. Return              JSON with segments, text, duration
 ```
 
 ## Content Filter
 
-Added in commit `455ce7b`. Classifies transcripts as `entertainment` (gaming/TV) or `keep` before
-Omi creates a memory. Returns empty segments for entertainment content.
+Cascade classifier — classifies transcripts before Omi creates a memory.
+Returns `{"segments": [], "text": ""}` for entertainment so Omi saves nothing.
 
-- Built-in signals for common games (RDR2, Hitman) and generic phrases
-- User-editable: `~/.omi/block_keywords.txt` and `~/.omi/allow_keywords.txt`
-- `POST /filter/reload` — reload keyword files without restart
-- Informative signals (≥2 hits) override entertainment detection — tutorials mentioning game names are kept
+**Tier 1 — Zero-shot NLI** (`NLI_ENABLED=true`, default on):
+- Runs inside the Python process via HuggingFace `zero-shot-classification` pipeline
+- Uses MPS on Apple Silicon, CUDA on Nvidia, CPU fallback
+- Labels: `"gaming, sitcom, movie, TV show, or scripted fiction"` vs `"tutorial, educational video..."`
+- If confidence ≥ `NLI_THRESHOLD` (default 0.85) → result is final, Ollama never called
+- If confidence < threshold → escalates to Tier 2
+
+**Tier 2 — Ollama** (`OLLAMA_ENABLED=false` by default):
+- HTTP POST to Ollama `/api/generate` with a one-shot classification prompt
+- Only called when NLI is uncertain (e.g. Hinglish, ambiguous content)
+- Times out after `OLLAMA_TIMEOUT` seconds → returns `keep` (safe default)
+- Point at a remote machine: `OLLAMA_URL=http://192.168.1.X:11434`
+
+**Safe defaults:** on any failure (NLI error, Ollama unreachable, unclear answer) the classifier returns `keep` — never drops content silently.
+
+## Live Dashboard (`/ui`)
+
+`GET /ui` — serves `ui.html`, a self-contained HTML/JS dashboard.
+`GET /events` — Server-Sent Events stream; one `asyncio.Queue` per connected client.
+
+`emit_event(type, data)` is a sync helper called from the async inference route and from
+`classify_content()`. It puts JSON onto every client queue. Full queues (disconnected clients)
+are pruned automatically.
+
+Events emitted per chunk:
+
+| Event | When | Key fields |
+|---|---|---|
+| `audio_received` | Start of inference | `chunk_id`, `size_kb` |
+| `transcribed` | After whisperx | `chunk_id`, `lang`, `segments` |
+| `nli_result` | After NLI runs | `chunk_id`, `decision`, `confidence`, `confident` |
+| `ollama_result` | After Ollama runs | `chunk_id`, `decision` |
+| `filtered` | Chunk dropped | `chunk_id`, `preview` |
+| `transcript` | Chunk saved | `chunk_id`, `lang`, `duration`, `segments[]` |
 
 ## Speaker Enrollment
 
@@ -177,3 +221,6 @@ Subsequent starts are fast once the volume is populated.
 - Load `load_align_model` at startup — it must stay per-request (language varies per audio)
 - Add new pip dependencies to `requirements.txt` without checking they have aarch64 wheels
   (the service must also run on Raspberry Pi 5)
+- Add keyword lists back to the content filter — they were removed intentionally; NLI+Ollama handle classification
+- Make `classify_content()` synchronous — it must stay `async` (Ollama call is async HTTP)
+- Call `_classify_with_nli()` directly from async code without `asyncio.to_thread` — the HuggingFace pipeline is blocking
