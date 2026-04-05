@@ -188,7 +188,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
   <div class="field">
     <label>Audio source</label>
     <div class="source-group">
-      <button class="source-btn active" id="src-synth"  onclick="setSource('synthetic')">Synthetic</button>
+      <button class="source-btn active" id="src-synthetic" onclick="setSource('synthetic')">Synthetic</button>
       <button class="source-btn"        id="src-upload" onclick="setSource('upload')">Upload</button>
       <button class="source-btn"        id="src-record" onclick="setSource('record')">Record</button>
     </div>
@@ -309,6 +309,10 @@ async function toggleRecord() {
 }
 
 async function startRecording() {
+  if (!navigator.mediaDevices) {
+    setStatus('Mic requires HTTPS — use Upload instead', 'err');
+    return;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recordedBlob  = null;
