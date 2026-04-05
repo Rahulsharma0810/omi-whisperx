@@ -606,6 +606,7 @@ async def inference(
 # ---------------------------------------------------------------------------
 _bench_clients: set[asyncio.Queue] = set()
 _bench_running: bool = False
+_bench_task: Optional[asyncio.Task] = None
 
 
 def emit_bench(event_type: str, data: dict) -> None:
@@ -823,10 +824,26 @@ async def benchmark_run_endpoint(
         tmp.close()
         provided_path = tmp.name
 
-    asyncio.create_task(_run_bench(
+    global _bench_task
+    _bench_task = asyncio.create_task(_run_bench(
         trials, language, no_alignment, no_diarization, no_embedding,
         duration, provided_path))
     return JSONResponse({"status": "started"})
+
+
+@app.get("/benchmark/status")
+async def benchmark_status():
+    return JSONResponse({"running": _bench_running})
+
+
+@app.post("/benchmark/cancel")
+async def benchmark_cancel():
+    global _bench_running, _bench_task
+    if _bench_task and not _bench_task.done():
+        _bench_task.cancel()
+    _bench_running = False
+    emit_bench("bench_error", {"message": "cancelled"})
+    return JSONResponse({"status": "cancelled"})
 
 
 @app.get("/ui", response_class=HTMLResponse)

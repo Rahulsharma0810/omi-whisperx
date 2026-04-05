@@ -245,7 +245,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
     </div>
   </div>
 
-  <button id="run-btn" onclick="runBenchmark()">Run</button>
+  <button id="run-btn" onclick="runOrCancel()">Run</button>
   <span id="status">idle</span>
 </div>
 
@@ -362,6 +362,44 @@ function setStatus(msg, cls) {
   statusEl.className = cls || '';
 }
 
+function setRunning(running) {
+  runBtn.textContent = running ? 'Cancel' : 'Run';
+  runBtn.style.background = running ? '#6e2020' : '';
+  runBtn.disabled = false;
+  if (running) setStatus('running…', 'running');
+}
+
+async function cancelBenchmark() {
+  await fetch('/benchmark/cancel', { method: 'POST' });
+  setRunning(false);
+  setStatus('cancelled', '');
+  if (es) { es.close(); es = null; }
+}
+
+async function runOrCancel() {
+  if (runBtn.textContent === 'Cancel') {
+    await cancelBenchmark();
+  } else {
+    await runBenchmark();
+  }
+}
+
+// Check if a benchmark is already running when the page loads
+async function checkStatus() {
+  const resp = await fetch('/benchmark/status');
+  const data = await resp.json();
+  if (data.running) {
+    setRunning(true);
+    // Reconnect to the SSE stream to show live progress
+    if (es) es.close();
+    es = new EventSource('/benchmark/events');
+    es.onmessage = (e) => {
+      try { const ev = JSON.parse(e.data); const h = HANDLERS[ev.type]; if (h) h(ev); } catch (_) {}
+    };
+  }
+}
+window.addEventListener('load', checkStatus);
+
 function rtfClass(rtf) {
   if (rtf < 0.8) return 'rtf-good';
   if (rtf < 1.5) return 'rtf-ok';
@@ -437,7 +475,7 @@ let _audioDuration = 30;
 const _onBenchStartOrig = onBenchStart;
 
 function onBenchComplete(ev) {
-  runBtn.disabled = false;
+  setRunning(false);
   setStatus('done', 'done');
   if (es) { es.close(); es = null; }
 
@@ -476,8 +514,9 @@ function onBenchComplete(ev) {
 }
 
 function onBenchError(ev) {
-  runBtn.disabled = false;
-  setStatus('error: ' + ev.message, 'err');
+  setRunning(false);
+  setStatus(ev.message === 'cancelled' ? 'cancelled' : 'error: ' + ev.message,
+            ev.message === 'cancelled' ? '' : 'err');
   if (es) { es.close(); es = null; }
 }
 
@@ -496,7 +535,6 @@ const HANDLERS = {
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 async function runBenchmark() {
-  // Validate source
   if (audioSource === 'upload' && !uploadedFile) {
     setStatus('choose a file first', 'err'); return;
   }
@@ -504,7 +542,7 @@ async function runBenchmark() {
     setStatus('record audio first', 'err'); return;
   }
 
-  runBtn.disabled = true;
+  setRunning(true);
   setStatus('starting…', 'running');
 
   const body = new FormData();
@@ -524,9 +562,7 @@ async function runBenchmark() {
 
   const resp = await fetch('/benchmark/run', { method: 'POST', body });
   const data = await resp.json();
-  if (data.error) { setStatus(data.error, 'err'); runBtn.disabled = false; return; }
-
-  setStatus('running…', 'running');
+  if (data.error) { setRunning(false); setStatus(data.error, 'err'); return; }
   if (es) es.close();
   es = new EventSource('/benchmark/events');
   es.onmessage = (e) => {
