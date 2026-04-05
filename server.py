@@ -232,7 +232,7 @@ async def _classify_with_ollama(text: str) -> str:
 
     for attempt in range(1, _OLLAMA_RETRY_ATTEMPTS + 1):
         try:
-            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT, trust_env=False) as client:
                 resp = await client.post(
                     f"{OLLAMA_URL}/api/chat",
                     json={"model": OLLAMA_MODEL,
@@ -760,7 +760,10 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
             if not no_embedding and diarize_segs is not None:
                 t0 = time.perf_counter()
                 try:
-                    audio_arr, sr = sf.read(audio_path)
+                    # whisperx.load_audio handles any ffmpeg-supported format (m4a, mp3, etc.)
+                    raw = whisperx.load_audio(audio_path)  # float32 mono at 16kHz
+                    sr = 16000
+                    audio_arr = raw
                     for _, row in diarize_segs.iterrows():
                         chunk = audio_arr[int(row["start"] * sr):int(row["end"] * sr)]
                         if len(chunk) < sr:
