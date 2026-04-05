@@ -1,8 +1,6 @@
 FROM python:3.12-slim
 
 ARG TARGETARCH
-ARG APP_VERSION=dev
-ENV APP_VERSION=$APP_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -27,6 +25,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py benchmark.py ui.html benchmark.html ./
+
+# APP_VERSION changes every commit — declare it last so it doesn't bust the package cache
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
 
 # HuggingFace model cache and speaker profiles — mount a volume here
 ENV HF_HOME=/data/huggingface
