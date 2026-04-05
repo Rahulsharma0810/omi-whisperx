@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omi-whisperx benchmark</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 10px 16px;
+  border-bottom: 1px solid #21262d;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+  background: #161b22;
+}
+h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
+
+nav { margin-left: auto; display: flex; gap: 16px; }
+nav a {
+  color: #8b949e; font-size: 11px; text-decoration: none;
+  padding: 2px 8px; border-radius: 4px; border: 1px solid #21262d;
+}
+nav a:hover { color: #e6edf3; border-color: #444c56; }
+
+/* ── Form ── */
+.form-section {
+  padding: 16px;
+  border-bottom: 1px solid #21262d;
+  background: #0d1117;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { color: #8b949e; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+select, input[type="number"], input[type="text"] {
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  width: 100px;
+}
+select { width: 120px; }
+
+.checks { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.checks label {
+  display: flex; gap: 5px; align-items: center;
+  color: #8b949e; font-size: 11px; cursor: pointer;
+}
+input[type="checkbox"] { accent-color: #58a6ff; }
+
+button#run-btn {
+  background: #238636;
+  color: #fff;
+  border: none;
+  padding: 6px 18px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+}
+button#run-btn:hover { background: #2ea043; }
+button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; }
+
+#status {
+  font-size: 11px;
+  color: #6e7681;
+  align-self: center;
+}
+#status.running { color: #d29922; }
+#status.done    { color: #3fb950; }
+#status.err     { color: #f85149; }
+
+/* ── Output feed ── */
+#output {
+  flex: 1;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.sys-info {
+  color: #6e7681;
+  font-size: 11px;
+  line-height: 1.8;
+}
+.sys-info span { color: #8b949e; }
+.sys-info .val { color: #a5d6ff; }
+
+/* Trial block */
+.trial-block {
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.trial-header {
+  background: #161b22;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: #8b949e;
+  border-bottom: 1px solid #21262d;
+}
+.trial-header .tn { color: #58a6ff; font-weight: 600; }
+
+.stage-row {
+  display: grid;
+  grid-template-columns: 130px 80px 80px 1fr;
+  padding: 4px 12px;
+  border-top: 1px solid #161b22;
+  font-size: 12px;
+  align-items: center;
+}
+.stage-row:first-of-type { border-top: none; }
+.stage-name { color: #8b949e; }
+.stage-elapsed { color: #e6edf3; text-align: right; }
+.stage-rtf { font-size: 11px; text-align: right; }
+.rtf-good { color: #3fb950; }
+.rtf-ok   { color: #d29922; }
+.rtf-slow { color: #f85149; }
+.stage-bar-wrap { padding-left: 12px; }
+.stage-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: #58a6ff;
+  min-width: 2px;
+  transition: width 0.3s;
+}
+.stage-row.total-row { border-top: 1px solid #21262d; }
+.stage-row.total-row .stage-name { color: #e6edf3; font-weight: 600; }
+.stage-row.total-row .stage-elapsed { color: #e6edf3; font-weight: 600; }
+
+/* Summary table */
+.summary {
+  border: 1px solid #238636;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.summary-header {
+  background: #0f2d16;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #3fb950;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid #238636;
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: 130px 80px 70px 70px 1fr;
+  font-size: 11px;
+}
+.summary-grid .hdr {
+  color: #6e7681;
+  padding: 4px 12px;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  border-bottom: 1px solid #21262d;
+}
+.summary-grid .cell {
+  padding: 4px 12px;
+  border-top: 1px solid #161b22;
+  color: #e6edf3;
+}
+.summary-grid .cell.dim { color: #8b949e; }
+.summary-grid .cell:first-child { color: #8b949e; }
+.summary-grid .total-cell { font-weight: 600; color: #e6edf3 !important; }
+
+.mem-info {
+  font-size: 11px;
+  color: #6e7681;
+  padding: 6px 12px;
+  border-top: 1px solid #21262d;
+}
+.mem-info span { color: #a5d6ff; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>omi-whisperx benchmark</h1>
+  <nav>
+    <a href="/ui">monitor</a>
+    <a href="/health">health</a>
+  </nav>
+</header>
+
+<!-- Form -->
+<div class="form-section">
+  <div class="field">
+    <label>Trials</label>
+    <input type="number" id="f-trials" value="3" min="1" max="10">
+  </div>
+  <div class="field">
+    <label>Language</label>
+    <select id="f-lang">
+      <option value="en">en</option>
+      <option value="hi">hi</option>
+      <option value="">auto</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Audio (s)</label>
+    <input type="number" id="f-duration" value="30" min="5" max="120">
+  </div>
+  <div class="field">
+    <label>Skip stages</label>
+    <div class="checks">
+      <label><input type="checkbox" id="f-no-align"> alignment</label>
+      <label><input type="checkbox" id="f-no-diar"> diarization</label>
+      <label><input type="checkbox" id="f-no-emb"> embedding</label>
+    </div>
+  </div>
+  <button id="run-btn" onclick="runBenchmark()">Run</button>
+  <span id="status">idle</span>
+</div>
+
+<div id="output"></div>
+
+<script>
+const output   = document.getElementById('output');
+const runBtn   = document.getElementById('run-btn');
+const statusEl = document.getElementById('status');
+
+let es = null;
+let currentTrial = null;  // DOM element for current trial block
+let lastStageMax = 1;     // for bar scaling within a trial
+
+function setStatus(msg, cls) {
+  statusEl.textContent = msg;
+  statusEl.className = cls || '';
+}
+
+function rtfClass(rtf) {
+  if (rtf < 0.8) return 'rtf-good';
+  if (rtf < 1.5) return 'rtf-ok';
+  return 'rtf-slow';
+}
+
+// ── Handlers ────────────────────────────────────────────────────────────────
+
+function onBenchStart(ev) {
+  output.innerHTML = '';
+  lastStageMax = 1;
+  const s = ev.system;
+  const div = document.createElement('div');
+  div.className = 'sys-info';
+  div.innerHTML =
+    `<span>model</span> <span class="val">${s.model}</span> &nbsp;` +
+    `<span>whisper</span> <span class="val">${s.whisper_device}/${s.compute_type}</span> &nbsp;` +
+    `<span>torch</span> <span class="val">${s.torch_device}</span> &nbsp;` +
+    `<span>batch</span> <span class="val">${s.batch_size}</span> &nbsp;` +
+    `<span>audio</span> <span class="val">${ev.audio_duration}s synthetic</span> &nbsp;` +
+    `<span>lang</span> <span class="val">${ev.language}</span>`;
+  output.appendChild(div);
+}
+
+function onTrialStart(ev) {
+  lastStageMax = 1;
+  const block = document.createElement('div');
+  block.className = 'trial-block';
+  block.id = `trial-${ev.trial}`;
+  block.innerHTML = `<div class="trial-header"><span class="tn">Trial ${ev.trial}</span> / ${ev.total}</div>`;
+  output.appendChild(block);
+  currentTrial = block;
+  output.scrollTop = output.scrollHeight;
+}
+
+function onBenchStage(ev) {
+  const block = document.getElementById(`trial-${ev.trial}`);
+  if (!block) return;
+  const rtf = ev.elapsed / (parseFloat(document.getElementById('f-duration').value) || 30);
+  if (ev.elapsed > lastStageMax) lastStageMax = ev.elapsed;
+  const barWidth = Math.max(4, Math.round((ev.elapsed / lastStageMax) * 200));
+
+  const row = document.createElement('div');
+  row.className = 'stage-row';
+  row.innerHTML =
+    `<div class="stage-name">${ev.stage}</div>` +
+    `<div class="stage-elapsed">${ev.elapsed.toFixed(2)}s</div>` +
+    `<div class="stage-rtf ${rtfClass(rtf)}">RTF ${rtf.toFixed(3)}</div>` +
+    `<div class="stage-bar-wrap"><div class="stage-bar" style="width:${barWidth}px"></div></div>`;
+  block.appendChild(row);
+  output.scrollTop = output.scrollHeight;
+}
+
+function onTrialDone(ev) {
+  const block = document.getElementById(`trial-${ev.trial}`);
+  if (!block) return;
+  const dur = parseFloat(document.getElementById('f-duration').value) || 30;
+  const rtf = ev.total / dur;
+  const row = document.createElement('div');
+  row.className = 'stage-row total-row';
+  row.innerHTML =
+    `<div class="stage-name">total</div>` +
+    `<div class="stage-elapsed">${ev.total.toFixed(2)}s</div>` +
+    `<div class="stage-rtf ${rtfClass(rtf)}">RTF ${rtf.toFixed(3)}</div>` +
+    `<div></div>`;
+  block.appendChild(row);
+  output.scrollTop = output.scrollHeight;
+}
+
+function onBenchComplete(ev) {
+  runBtn.disabled = false;
+  setStatus('done', 'done');
+  if (es) { es.close(); es = null; }
+
+  const dur = parseFloat(document.getElementById('f-duration').value) || 30;
+  const allStages = [...(ev.stages || [])];
+  if (ev.total) allStages.push(ev.total);
+
+  // Header row
+  let gridHtml =
+    `<div class="hdr">stage</div><div class="hdr" style="text-align:right">mean(s)</div>` +
+    `<div class="hdr" style="text-align:right">std(s)</div>` +
+    `<div class="hdr" style="text-align:right">RTF</div><div class="hdr">trials</div>`;
+
+  allStages.forEach(s => {
+    const isTotal = s.name === 'total';
+    const cls = isTotal ? 'cell total-cell' : 'cell';
+    const trialTimes = (s.times || []).map(t => t.toFixed(2)).join('  ');
+    gridHtml +=
+      `<div class="${cls}">${s.name}</div>` +
+      `<div class="${cls}" style="text-align:right">${s.mean.toFixed(3)}</div>` +
+      `<div class="${cls} dim" style="text-align:right">±${s.std.toFixed(3)}</div>` +
+      `<div class="${cls} ${rtfClass(s.rtf)}" style="text-align:right">${s.rtf.toFixed(4)}</div>` +
+      `<div class="${isTotal ? cls : 'cell dim'}">${trialTimes}</div>`;
+  });
+
+  const summary = document.createElement('div');
+  summary.className = 'summary';
+  summary.innerHTML =
+    `<div class="summary-header">Summary — RTF &lt; 1.0 = faster than real-time</div>` +
+    `<div class="summary-grid">${gridHtml}</div>` +
+    `<div class="mem-info">` +
+      `RAM baseline <span>${ev.ram_baseline_mb} MB</span> &nbsp;` +
+      `peak <span>${ev.ram_peak_mb} MB</span> &nbsp;` +
+      `delta <span>${(ev.ram_peak_mb - ev.ram_baseline_mb).toFixed(0)} MB</span>` +
+    `</div>`;
+  output.appendChild(summary);
+  output.scrollTop = output.scrollHeight;
+}
+
+function onBenchError(ev) {
+  runBtn.disabled = false;
+  setStatus('error: ' + ev.message, 'err');
+  if (es) { es.close(); es = null; }
+}
+
+const HANDLERS = {
+  bench_start:       onBenchStart,
+  bench_trial_start: onTrialStart,
+  bench_stage:       onBenchStage,
+  bench_trial_done:  onTrialDone,
+  bench_complete:    onBenchComplete,
+  bench_error:       onBenchError,
+};
+
+// ── Run ─────────────────────────────────────────────────────────────────────
+
+async function runBenchmark() {
+  runBtn.disabled = true;
+  setStatus('starting…', 'running');
+
+  const body = new FormData();
+  body.append('trials',        document.getElementById('f-trials').value);
+  body.append('language',      document.getElementById('f-lang').value);
+  body.append('duration',      document.getElementById('f-duration').value);
+  body.append('no_alignment',  document.getElementById('f-no-align').checked);
+  body.append('no_diarization',document.getElementById('f-no-diar').checked);
+  body.append('no_embedding',  document.getElementById('f-no-emb').checked);
+
+  const resp = await fetch('/benchmark/run', { method: 'POST', body });
+  const data = await resp.json();
+  if (data.error) {
+    setStatus(data.error, 'err');
+    runBtn.disabled = false;
+    return;
+  }
+
+  setStatus('running…', 'running');
+
+  if (es) es.close();
+  es = new EventSource('/benchmark/events');
+  es.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      const h = HANDLERS[ev.type];
+      if (h) h(ev);
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    if (runBtn.disabled) {
+      // still running — reconnect
+      setTimeout(() => {
+        es = new EventSource('/benchmark/events');
+      }, 1000);
+    }
+  };
+}
+</script>
+</body>
+</html>

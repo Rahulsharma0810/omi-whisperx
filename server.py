@@ -10,7 +10,10 @@ import numpy as np
 import torch
 import httpx
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, Form
+import platform
+import resource
+import soundfile as sf
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from typing import Optional
 import whisperx
@@ -548,6 +551,212 @@ async def inference(
 
     finally:
         os.unlink(audio_path)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark — in-process pipeline timer reusing loaded models
+# ---------------------------------------------------------------------------
+_bench_clients: set[asyncio.Queue] = set()
+_bench_running: bool = False
+
+
+def emit_bench(event_type: str, data: dict) -> None:
+    payload = json.dumps({"type": event_type, **data})
+    dead = set()
+    for q in _bench_clients:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _bench_clients.difference_update(dead)
+
+
+def _generate_bench_audio(duration: float, sample_rate: int = 16000) -> str:
+    """Write speech-like synthetic audio to a temp WAV, return path."""
+    import math
+    rng = np.random.default_rng(42)
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    sig = sum(np.sin(2 * math.pi * f * t) for f in [120, 400, 1200, 2500])
+    mod = 0.5 + 0.5 * np.sin(2 * math.pi * 4 * t)
+    sig = sig * mod + rng.normal(0, 0.1, len(t))
+    peak = np.max(np.abs(sig))
+    if peak > 0:
+        sig = sig / peak * 0.7
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    sf.write(tmp.name, sig.astype(np.float32), sample_rate)
+    return tmp.name
+
+
+def _ram_mb() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return usage.ru_maxrss / 1024 / 1024 if platform.system() == "Darwin" else usage.ru_maxrss / 1024
+
+
+async def _run_bench(trials: int, language: str, no_alignment: bool,
+                     no_diarization: bool, no_embedding: bool, duration: float) -> None:
+    global _bench_running
+    audio_path = None
+    try:
+        audio_path = await asyncio.to_thread(_generate_bench_audio, duration)
+
+        emit_bench("bench_start", {
+            "trials": trials, "audio_duration": duration, "language": language or "auto",
+            "system": {
+                "whisper_device": WHISPER_DEVICE, "compute_type": COMPUTE_TYPE,
+                "torch_device": TORCH_DEVICE, "model": MODEL_SIZE, "batch_size": BATCH_SIZE,
+            },
+        })
+
+        all_times: dict[str, list[float]] = {}
+        ram_baseline = _ram_mb()
+
+        for trial in range(1, trials + 1):
+            emit_bench("bench_trial_start", {"trial": trial, "total": trials})
+            t_trial = time.perf_counter()
+            timings: dict[str, float] = {}
+
+            # --- Transcription ---
+            t0 = time.perf_counter()
+            result = await asyncio.to_thread(
+                model.transcribe, audio_path,
+                language=language or None, task="transcribe",
+                batch_size=BATCH_SIZE, initial_prompt=None,
+            )
+            timings["transcription"] = time.perf_counter() - t0
+            detected_lang = result.get("language", language or "en")
+            emit_bench("bench_stage", {"trial": trial, "stage": "transcription",
+                                       "elapsed": round(timings["transcription"], 3)})
+
+            # --- Alignment ---
+            if not no_alignment:
+                t0 = time.perf_counter()
+                try:
+                    align_model, metadata = await asyncio.to_thread(
+                        whisperx.load_align_model, detected_lang, TORCH_DEVICE)
+                    result = await asyncio.to_thread(
+                        whisperx.align, result["segments"], align_model,
+                        metadata, audio_path, TORCH_DEVICE)
+                    del align_model
+                except Exception as e:
+                    logger.warning(f"[BENCH] Alignment skipped: {e}")
+                timings["alignment"] = time.perf_counter() - t0
+                emit_bench("bench_stage", {"trial": trial, "stage": "alignment",
+                                           "elapsed": round(timings["alignment"], 3)})
+
+            # --- Diarization ---
+            diarize_segs = None
+            if not no_diarization:
+                t0 = time.perf_counter()
+                try:
+                    diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
+                    result = assign_word_speakers(diarize_segs, result)
+                except Exception as e:
+                    logger.warning(f"[BENCH] Diarization skipped: {e}")
+                timings["diarization"] = time.perf_counter() - t0
+                emit_bench("bench_stage", {"trial": trial, "stage": "diarization",
+                                           "elapsed": round(timings["diarization"], 3)})
+
+            # --- Embedding ---
+            if not no_embedding and diarize_segs is not None:
+                t0 = time.perf_counter()
+                try:
+                    audio_arr, sr = sf.read(audio_path)
+                    for _, row in diarize_segs.iterrows():
+                        chunk = audio_arr[int(row["start"] * sr):int(row["end"] * sr)]
+                        if len(chunk) < sr:
+                            continue
+                        wav = preprocess_wav(chunk.astype(np.float32), source_sr=sr)
+                        voice_encoder.embed_utterance(wav)
+                except Exception as e:
+                    logger.warning(f"[BENCH] Embedding skipped: {e}")
+                timings["embedding"] = time.perf_counter() - t0
+                emit_bench("bench_stage", {"trial": trial, "stage": "embedding",
+                                           "elapsed": round(timings["embedding"], 3)})
+
+            timings["total"] = time.perf_counter() - t_trial
+            for k, v in timings.items():
+                all_times.setdefault(k, []).append(v)
+            emit_bench("bench_trial_done", {"trial": trial, "total": round(timings["total"], 3)})
+
+        def _stats(name):
+            times = all_times.get(name, [])
+            if not times:
+                return None
+            mean = float(np.mean(times))
+            std = float(np.std(times, ddof=1)) if len(times) > 1 else 0.0
+            return {"name": name, "times": [round(t, 3) for t in times],
+                    "mean": round(mean, 3), "std": round(std, 3),
+                    "rtf": round(mean / duration, 4)}
+
+        stages = [s for s in [_stats(n) for n in
+                               ["transcription", "alignment", "diarization", "embedding"]] if s]
+        total = _stats("total")
+        emit_bench("bench_complete", {
+            "stages": stages, "total": total,
+            "ram_baseline_mb": round(ram_baseline, 1),
+            "ram_peak_mb": round(_ram_mb(), 1),
+        })
+
+    except Exception as e:
+        logger.error(f"[BENCH] {e}")
+        emit_bench("bench_error", {"message": str(e)})
+    finally:
+        _bench_running = False
+        if audio_path:
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
+
+
+@app.get("/benchmark", response_class=HTMLResponse)
+async def benchmark_page():
+    html_path = Path(__file__).parent / "benchmark.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/benchmark/events")
+async def benchmark_sse(request: Request):
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _bench_clients.add(queue)
+
+    async def stream():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _bench_clients.discard(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/benchmark/run")
+async def benchmark_run_endpoint(
+    trials: int = Form(3),
+    language: str = Form("en"),
+    no_alignment: bool = Form(False),
+    no_diarization: bool = Form(False),
+    no_embedding: bool = Form(False),
+    duration: float = Form(30.0),
+):
+    global _bench_running
+    if _bench_running:
+        return JSONResponse({"error": "Benchmark already running"}, status_code=409)
+    _bench_running = True
+    asyncio.create_task(_run_bench(
+        trials, language, no_alignment, no_diarization, no_embedding, duration))
+    return JSONResponse({"status": "started"})
 
 
 @app.get("/ui", response_class=HTMLResponse)
