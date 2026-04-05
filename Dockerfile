@@ -30,6 +30,9 @@ COPY server.py benchmark.py ui.html ./
 ENV HF_HOME=/data/huggingface
 ENV PROFILES_DIR=/data/speakers
 
+# Suppress noisy pyannote/torchcodec warnings about missing CUDA libs on CPU containers
+ENV PYTHONWARNINGS="ignore::UserWarning:pyannote"
+
 # Server defaults (override with -e in Portainer / docker run)
 ENV WHISPER_MODEL=medium
 ENV WHISPER_BATCH_SIZE=16
