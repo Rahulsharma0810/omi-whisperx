@@ -1,6 +1,7 @@
 import re
 import tempfile
 import os
+import asyncio
 import logging
 import numpy as np
 import torch
@@ -68,7 +69,12 @@ CAPTURE_TRIGGER = re.compile(
 # ---------------------------------------------------------------------------
 CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "true").lower() == "true"
 
-# Ollama LLM classifier
+# Tier 1 — Zero-shot NLI (fast, local, runs inside this process)
+NLI_ENABLED = os.environ.get("NLI_ENABLED", "true").lower() == "true"
+NLI_MODEL = os.environ.get("NLI_MODEL", "typeform/distilbert-base-uncased-mnli")
+NLI_THRESHOLD = float(os.environ.get("NLI_THRESHOLD", "0.85"))
+
+# Tier 2 — Ollama LLM (thorough, used only when NLI is uncertain)
 # Enable: OLLAMA_ENABLED=true
 # Point at your machine: OLLAMA_URL=http://192.168.1.X:11434
 OLLAMA_ENABLED = os.environ.get("OLLAMA_ENABLED", "false").lower() == "true"
@@ -76,16 +82,29 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma2:2b")
 OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "5"))
 
+# Descriptive labels — more words = better zero-shot accuracy
+_NLI_LABELS = [
+    "gaming, sitcom, movie, TV show, or scripted fiction",
+    "tutorial, educational video, news, documentary, how-to, or real conversation",
+]
 
-async def classify_content(text: str) -> str:
-    """
-    Classifies transcript via Ollama.
-    Returns 'entertainment' or 'keep'.
-    If filter is disabled, Ollama is off, or Ollama is unreachable — always returns 'keep'.
-    """
-    if not CONTENT_FILTER_ENABLED or not OLLAMA_ENABLED or not text.strip():
-        return "keep"
 
+def _classify_with_nli(text: str) -> tuple[str, float]:
+    """
+    Runs zero-shot NLI. Returns (decision, confidence).
+    decision is 'entertainment' or 'keep'.
+    """
+    result = nli_pipeline(text[:400], candidate_labels=_NLI_LABELS)
+    top_label: str = result["labels"][0]
+    top_score: float = result["scores"][0]
+    decision = "entertainment" if top_label == _NLI_LABELS[0] else "keep"
+    return decision, top_score
+
+
+async def _classify_with_ollama(text: str) -> str:
+    """
+    Calls Ollama. Returns 'entertainment', 'keep', or 'keep' on any failure.
+    """
     prompt = (
         'Classify the audio transcript below as exactly one word:\n'
         '"entertainment" — gaming, sitcom, movie, TV show, or scripted fiction.\n'
@@ -102,16 +121,41 @@ async def classify_content(text: str) -> str:
             resp.raise_for_status()
             answer = resp.json().get("response", "").strip().lower()
             if "entertainment" in answer:
-                logger.info(f"[FILTER] Ollama → entertainment")
+                logger.info("[FILTER] Ollama → entertainment")
                 return "entertainment"
             if "informative" in answer:
-                logger.info(f"[FILTER] Ollama → informative (keep)")
+                logger.info("[FILTER] Ollama → informative (keep)")
                 return "keep"
-            logger.warning(f"[FILTER] Ollama unclear answer: {answer!r} — keeping chunk")
+            logger.warning(f"[FILTER] Ollama unclear: {answer!r} — keeping chunk")
             return "keep"
     except Exception as e:
         logger.warning(f"[FILTER] Ollama unreachable ({e}) — keeping chunk")
         return "keep"
+
+
+async def classify_content(text: str) -> str:
+    """
+    Cascade classifier:
+      Tier 1 — NLI: fast, local. If confident (≥ NLI_THRESHOLD) → done.
+      Tier 2 — Ollama: only called when NLI is uncertain or disabled.
+      Default → keep (never drop when unsure).
+    """
+    if not CONTENT_FILTER_ENABLED or not text.strip():
+        return "keep"
+
+    # Tier 1: NLI
+    if NLI_ENABLED and nli_pipeline is not None:
+        decision, confidence = await asyncio.to_thread(_classify_with_nli, text)
+        logger.info(f"[FILTER] NLI → {decision} (confidence: {confidence:.2f})")
+        if confidence >= NLI_THRESHOLD:
+            return decision
+        logger.info(f"[FILTER] NLI uncertain — escalating to Ollama")
+
+    # Tier 2: Ollama
+    if OLLAMA_ENABLED:
+        return await _classify_with_ollama(text)
+
+    return "keep"
 
 # ---------------------------------------------------------------------------
 # Load models
@@ -128,6 +172,18 @@ diarize_model = DiarizationPipeline(token=HF_TOKEN, device=TORCH_DEVICE)
 logger.info("Loading speaker encoder ...")
 # resemblyzer does not support MPS; keep on CPU
 voice_encoder = VoiceEncoder(device="cpu")
+
+# NLI zero-shot classifier (Tier 1 content filter)
+nli_pipeline = None
+if CONTENT_FILTER_ENABLED and NLI_ENABLED:
+    from transformers import pipeline as hf_pipeline
+    logger.info(f"Loading NLI classifier '{NLI_MODEL}' on {TORCH_DEVICE} ...")
+    nli_pipeline = hf_pipeline(
+        "zero-shot-classification",
+        model=NLI_MODEL,
+        device=TORCH_DEVICE,
+    )
+    logger.info("NLI classifier ready.")
 
 
 # ---------------------------------------------------------------------------
@@ -392,11 +448,18 @@ async def reset_all():
 async def get_filter():
     return {
         "enabled": CONTENT_FILTER_ENABLED,
+        "nli": {
+            "enabled": NLI_ENABLED,
+            "model": NLI_MODEL,
+            "confidence_threshold": NLI_THRESHOLD,
+            "loaded": nli_pipeline is not None,
+        },
         "ollama": {
             "enabled": OLLAMA_ENABLED,
             "url": OLLAMA_URL,
             "model": OLLAMA_MODEL,
             "timeout_seconds": OLLAMA_TIMEOUT,
+            "role": "fallback when NLI confidence < threshold",
         },
     }
 
@@ -410,5 +473,6 @@ async def health():
         "capture_pending": capture_pending,
         "speaker_threshold": SPEAKER_THRESHOLD,
         "content_filter": CONTENT_FILTER_ENABLED,
+        "nli_enabled": NLI_ENABLED,
         "ollama_enabled": OLLAMA_ENABLED,
     }
