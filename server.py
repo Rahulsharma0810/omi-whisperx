@@ -80,6 +80,24 @@ def emit_event(event_type: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+# App version: injected as APP_VERSION env var by CI (Docker build arg).
+# Falls back to reading git SHA directly when running from source (dev/launchctl).
+def _detect_version() -> str:
+    v = os.environ.get("APP_VERSION", "").strip()
+    if v and v != "dev":
+        return v
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "dev"
+
+APP_VERSION = _detect_version()
+
 MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
 BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -893,6 +911,7 @@ async def get_filter():
 async def health():
     return {
         "status": "ok",
+        "version": APP_VERSION,
         "model": MODEL_SIZE,
         "named_speakers": list(named_speakers.keys()),
         "capture_pending": capture_pending,
