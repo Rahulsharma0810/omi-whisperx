@@ -733,6 +733,52 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
                 emit_bench("bench_stage", {"trial": trial, "stage": "embedding",
                                            "elapsed": round(timings["embedding"], 3)})
 
+            # --- Transcript + Content filter (NLI + Ollama) ---
+            full_text = " ".join(
+                seg.get("text", "").strip() for seg in result.get("segments", [])
+            )
+            emit_bench("bench_transcript", {
+                "trial": trial,
+                "text": full_text[:400],
+                "lang": detected_lang,
+                "segments": [
+                    {"speaker": seg.get("speaker", "SPEAKER_00"),
+                     "text": seg.get("text", "").strip(),
+                     "start": round(seg.get("start", 0.0), 2),
+                     "end": round(seg.get("end", 0.0), 2)}
+                    for seg in result.get("segments", [])[:10]
+                ],
+            })
+
+            if CONTENT_FILTER_ENABLED and full_text.strip():
+                t0 = time.perf_counter()
+                if NLI_ENABLED and nli_pipeline is not None:
+                    try:
+                        nli_dec, nli_conf, nli_scores = await asyncio.to_thread(
+                            _classify_with_nli, full_text)
+                        confident = nli_conf >= NLI_THRESHOLD
+                        emit_bench("bench_nli_result", {
+                            "trial": trial,
+                            "decision": nli_dec,
+                            "confidence": round(nli_conf, 3),
+                            "confident": confident,
+                            "input_text": full_text[:200],
+                            "scores": nli_scores,
+                        })
+                        if not confident and OLLAMA_ENABLED:
+                            oll_dec, oll_raw = await _classify_with_ollama(full_text)
+                            emit_bench("bench_ollama_result", {
+                                "trial": trial,
+                                "decision": oll_dec,
+                                "input_text": full_text[:200],
+                                "raw_response": oll_raw,
+                            })
+                    except Exception as e:
+                        logger.warning(f"[BENCH] Content filter failed: {e}")
+                timings["content_filter"] = time.perf_counter() - t0
+                emit_bench("bench_stage", {"trial": trial, "stage": "content_filter",
+                                           "elapsed": round(timings["content_filter"], 3)})
+
             timings["total"] = time.perf_counter() - t_trial
             for k, v in timings.items():
                 all_times.setdefault(k, []).append(v)
@@ -749,7 +795,8 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
                     "rtf": round(mean / duration, 4)}
 
         stages = [s for s in [_stats(n) for n in
-                               ["transcription", "alignment", "diarization", "embedding"]] if s]
+                               ["transcription", "alignment", "diarization",
+                                "embedding", "content_filter"]] if s]
         total = _stats("total")
         emit_bench("bench_complete", {
             "stages": stages, "total": total,

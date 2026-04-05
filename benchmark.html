@@ -170,6 +170,38 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 .summary-grid .total-cell { font-weight: 600; color: #e6edf3 !important; }
 .mem-info { font-size: 11px; color: #6e7681; padding: 6px 12px; border-top: 1px solid #21262d; }
 .mem-info span { color: #a5d6ff; }
+
+/* E2E section inside trial block */
+.e2e-section { border-top: 1px solid #21262d; }
+.e2e-row {
+  display: flex; gap: 10px; padding: 4px 12px;
+  border-top: 1px solid #161b22; font-size: 12px; align-items: baseline;
+  line-height: 1.5;
+}
+.e2e-label {
+  width: 52px; flex-shrink: 0; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.5px; color: #6e7681; padding-top: 1px;
+}
+.e2e-content { flex: 1; min-width: 0; }
+.seg-speaker { color: #bc8cff; font-weight: 600; margin-right: 4px; }
+.seg-text    { color: #e6edf3; }
+.seg-timing  { color: #6e7681; font-size: 11px; margin-left: 6px; }
+.nli-keep { color: #3fb950; }
+.nli-ent  { color: #f85149; }
+.nli-unc  { color: #d29922; }
+.conf-pct { color: #6e7681; font-size: 11px; margin-left: 4px; }
+.escalated { color: #d29922; font-size: 11px; margin-left: 6px; }
+.detail { margin-top: 3px; display: flex; flex-direction: column; gap: 2px; }
+.detail-scores { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; }
+.score-item { color: #6e7681; }
+.score-item.top .score-lbl { color: #e6edf3; font-weight: 600; }
+.detail-input { font-size: 11px; color: #6e7681; font-style: italic;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.detail-input::before { content: "↳ "; color: #444c56; }
+.ollama-keep { color: #3fb950; }
+.ollama-ent  { color: #f85149; }
+.detail-raw  { font-size: 11px; color: #6e7681; }
+.detail-raw::before { content: "↳ raw: "; color: #444c56; }
 </style>
 </head>
 <body>
@@ -520,17 +552,80 @@ function onBenchError(ev) {
   if (es) { es.close(); es = null; }
 }
 
+function getOrCreateE2E(trialId) {
+  const block = document.getElementById(`trial-${trialId}`);
+  if (!block) return null;
+  let e2e = block.querySelector('.e2e-section');
+  if (!e2e) { e2e = document.createElement('div'); e2e.className = 'e2e-section'; block.appendChild(e2e); }
+  return e2e;
+}
+
+function addE2ERow(trialId, label, contentHtml) {
+  const e2e = getOrCreateE2E(trialId);
+  if (!e2e) return;
+  const row = document.createElement('div');
+  row.className = 'e2e-row';
+  row.innerHTML = `<div class="e2e-label">${label}</div><div class="e2e-content">${contentHtml}</div>`;
+  e2e.appendChild(row);
+  output.scrollTop = output.scrollHeight;
+}
+
+function onBenchTranscript(ev) {
+  if (!ev.segments || !ev.segments.length) {
+    addE2ERow(ev.trial, 'whisper', `<span style="color:#6e7681;font-size:11px">(no speech detected — use real audio)</span>`);
+    return;
+  }
+  ev.segments.forEach(seg => {
+    addE2ERow(ev.trial, 'seg',
+      `<span class="seg-speaker">[${seg.speaker}]</span>` +
+      `<span class="seg-text">${seg.text}</span>` +
+      `<span class="seg-timing">${seg.start.toFixed(1)}–${seg.end.toFixed(1)}s</span>`
+    );
+  });
+}
+
+function onBenchNliResult(ev) {
+  const pct = Math.round(ev.confidence * 100);
+  const cls = ev.confident ? (ev.decision === 'entertainment' ? 'nli-ent' : 'nli-keep') : 'nli-unc';
+  const esc = !ev.confident ? '<span class="escalated">→ Ollama</span>' : '';
+  const pills = (ev.scores || []).map((s, i) => {
+    const short = s.label.length > 28 ? s.label.slice(0, 28) + '…' : s.label;
+    return `<span class="score-item${i===0?' top':''}">` +
+           `<span class="score-lbl">${short}</span> ${Math.round(s.score*100)}%</span>`;
+  }).join('');
+  const inputLine = ev.input_text
+    ? `<div class="detail-input">${ev.input_text.slice(0, 120)}</div>` : '';
+  addE2ERow(ev.trial, 'NLI',
+    `<span class="${cls}">${ev.decision}</span><span class="conf-pct">${pct}%</span>${esc}` +
+    `<div class="detail"><div class="detail-scores">${pills}</div>${inputLine}</div>`
+  );
+}
+
+function onBenchOllamaResult(ev) {
+  const cls = ev.decision === 'entertainment' ? 'ollama-ent' : 'ollama-keep';
+  const rawLine = ev.raw_response ? `<div class="detail-raw">${ev.raw_response}</div>` : '';
+  const inputLine = ev.input_text
+    ? `<div class="detail-input">${ev.input_text.slice(0, 120)}</div>` : '';
+  addE2ERow(ev.trial, 'ollama',
+    `<span class="${cls}">${ev.decision}</span>` +
+    `<div class="detail">${rawLine}${inputLine}</div>`
+  );
+}
+
 const HANDLERS = {
-  bench_start:       (ev) => { _audioDuration = ev.audio_duration; onBenchStart(ev); },
-  bench_trial_start: (ev) => {
+  bench_start:         (ev) => { _audioDuration = ev.audio_duration; onBenchStart(ev); },
+  bench_trial_start:   (ev) => {
     onTrialStart(ev);
     const b = document.getElementById(`trial-${ev.trial}`);
     if (b) b.dataset.audioDuration = _audioDuration;
   },
-  bench_stage:       onBenchStage,
-  bench_trial_done:  onTrialDone,
-  bench_complete:    onBenchComplete,
-  bench_error:       onBenchError,
+  bench_stage:         onBenchStage,
+  bench_trial_done:    onTrialDone,
+  bench_transcript:    onBenchTranscript,
+  bench_nli_result:    onBenchNliResult,
+  bench_ollama_result: onBenchOllamaResult,
+  bench_complete:      onBenchComplete,
+  bench_error:         onBenchError,
 };
 
 // ── Run ──────────────────────────────────────────────────────────────────────
