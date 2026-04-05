@@ -1018,11 +1018,35 @@ async def health():
     return {
         "status": "ok",
         "version": APP_VERSION,
-        "model": MODEL_SIZE,
-        "named_speakers": list(named_speakers.keys()),
-        "capture_pending": capture_pending,
-        "speaker_threshold": SPEAKER_THRESHOLD,
-        "content_filter": CONTENT_FILTER_ENABLED,
-        "nli_enabled": NLI_ENABLED,
-        "ollama_enabled": OLLAMA_ENABLED,
+        "whisper": {
+            "model": MODEL_SIZE,
+            "batch_size": BATCH_SIZE,
+            "device": WHISPER_DEVICE,
+            "compute_type": COMPUTE_TYPE,
+            "torch_device": TORCH_DEVICE,
+        },
+        "speakers": {
+            "named": list(named_speakers.keys()),
+            "capture_pending": capture_pending,
+            "threshold": SPEAKER_THRESHOLD,
+            "profiles_dir": str(PROFILES_DIR),
+        },
+        "content_filter": {
+            "enabled": CONTENT_FILTER_ENABLED,
+            "nli": {
+                "enabled": NLI_ENABLED,
+                "model": NLI_MODEL,
+                "threshold": NLI_THRESHOLD,
+                "loaded": nli_pipeline is not None,
+            },
+            "ollama": {
+                "enabled": OLLAMA_ENABLED,
+                "url": OLLAMA_URL,
+                "model": OLLAMA_MODEL,
+                "timeout": OLLAMA_TIMEOUT,
+            },
+        },
+        "notifications": {
+            "ntfy_url": NTFY_URL,
+        },
     }
