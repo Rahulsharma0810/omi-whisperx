@@ -3,4 +3,5 @@ fastapi
 uvicorn[standard]
 python-multipart
 resemblyzer
+httpx
 setuptools==69.5.1

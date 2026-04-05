@@ -4,6 +4,7 @@ import os
 import logging
 import numpy as np
 import torch
+import httpx
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
@@ -67,6 +68,12 @@ CAPTURE_TRIGGER = re.compile(
 CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "true").lower() == "true"
 FILTER_DIR = Path(os.environ.get("FILTER_DIR", "~/.omi")).expanduser()
 
+# Ollama LLM classifier — set OLLAMA_ENABLED=true and point OLLAMA_URL at your machine
+OLLAMA_ENABLED = os.environ.get("OLLAMA_ENABLED", "false").lower() == "true"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma2:2b")
+OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "5"))
+
 # Built-in entertainment signals (need ≥2 hits to trigger, avoids false positives)
 _ENTERTAINMENT_SIGNALS: list[str] = [
     # Red Dead Redemption 2
@@ -121,33 +128,81 @@ def _load_filter_lists() -> tuple[list[str], list[str]]:
 _user_block, _user_allow = _load_filter_lists()
 
 
-def classify_content(text: str) -> str:
+def _classify_with_keywords(text: str) -> str:
     """
-    Returns 'entertainment' if the transcript is gaming/scripted fiction,
-    otherwise 'keep'. Default is always 'keep' when ambiguous.
+    Fast keyword-based fallback classifier.
+    Returns 'entertainment', 'keep', or 'unknown' (ambiguous).
+    """
+    t = text.lower()
+
+    if any(kw in t for kw in _user_allow):
+        return "keep"
+
+    if sum(1 for s in _INFORMATIVE_SIGNALS if s in t) >= 2:
+        return "keep"
+
+    if any(kw in t for kw in _user_block):
+        return "entertainment"
+
+    if sum(1 for s in _ENTERTAINMENT_SIGNALS if s in t) >= 2:
+        return "entertainment"
+
+    return "unknown"
+
+
+async def _classify_with_ollama(text: str) -> Optional[str]:
+    """
+    Ask Ollama to classify the transcript.
+    Returns 'entertainment', 'keep', or None if Ollama is unreachable.
+    """
+    prompt = (
+        'Classify the audio transcript below as exactly one word:\n'
+        '"entertainment" — if it is from gaming, a sitcom, movie, TV show, or scripted fiction.\n'
+        '"informative" — if it is a tutorial, educational video, news, documentary, how-to, or real conversation.\n\n'
+        f'Transcript: """{text[:400]}"""\n\n'
+        'Reply with one word only (entertainment or informative):'
+    )
+    try:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            )
+            resp.raise_for_status()
+            answer = resp.json().get("response", "").strip().lower()
+            if "entertainment" in answer:
+                return "entertainment"
+            if "informative" in answer:
+                return "keep"
+            logger.warning(f"[FILTER] Ollama gave unclear answer: {answer!r} — falling back to keywords")
+            return None
+    except Exception as e:
+        logger.warning(f"[FILTER] Ollama unreachable ({e}) — falling back to keywords")
+        return None
+
+
+async def classify_content(text: str) -> str:
+    """
+    Orchestrates classification:
+      1. Skip if filter disabled or text empty
+      2. Try Ollama if enabled (most accurate)
+      3. Fall back to keyword classifier
+      4. Default: keep (never drop when unsure)
     """
     if not CONTENT_FILTER_ENABLED or not text.strip():
         return "keep"
 
-    t = text.lower()
+    if OLLAMA_ENABLED:
+        result = await _classify_with_ollama(text)
+        if result is not None:
+            logger.info(f"[FILTER] Ollama classified as: {result}")
+            return result
 
-    # User allow-list overrides everything (e.g. "RDR2 speedrun tips")
-    if any(kw in t for kw in _user_allow):
+    result = _classify_with_keywords(text)
+    if result == "unknown":
         return "keep"
-
-    # ≥2 informative signals → educational content, keep regardless
-    if sum(1 for s in _INFORMATIVE_SIGNALS if s in t) >= 2:
-        return "keep"
-
-    # Hard block from user-defined file
-    if any(kw in t for kw in _user_block):
-        return "entertainment"
-
-    # ≥2 built-in entertainment signals → filter
-    if sum(1 for s in _ENTERTAINMENT_SIGNALS if s in t) >= 2:
-        return "entertainment"
-
-    return "keep"
+    logger.info(f"[FILTER] Keywords classified as: {result}")
+    return result
 
 # ---------------------------------------------------------------------------
 # Load models
@@ -350,7 +405,7 @@ async def inference(
         duration = float(segments[-1]["end"]) if segments else 0.0
 
         # Content filter: drop entertainment chunks — Omi won't save empty segments
-        content_class = classify_content(full_text)
+        content_class = await classify_content(full_text)
         if content_class == "entertainment":
             logger.info(f"[FILTER] Dropped entertainment content: {full_text[:120]!r}")
             return JSONResponse({
@@ -428,6 +483,12 @@ async def reset_all():
 async def get_filter():
     return {
         "enabled": CONTENT_FILTER_ENABLED,
+        "ollama": {
+            "enabled": OLLAMA_ENABLED,
+            "url": OLLAMA_URL,
+            "model": OLLAMA_MODEL,
+            "timeout_seconds": OLLAMA_TIMEOUT,
+        },
         "block_keywords": _user_block,
         "allow_keywords": _user_allow,
         "block_file": str(FILTER_DIR / "block_keywords.txt"),
@@ -456,4 +517,5 @@ async def health():
         "capture_pending": capture_pending,
         "speaker_threshold": SPEAKER_THRESHOLD,
         "content_filter": CONTENT_FILTER_ENABLED,
+        "ollama_enabled": OLLAMA_ENABLED,
     }
