@@ -463,8 +463,17 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
 
 
 def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
-    """Save an audio clip + metadata for an unrecognized speaker so the user can label it later."""
+    """Save one audio clip per unique unknown voice. Skip if a similar voice is already stored."""
     try:
+        # Check if we already have a recording with a similar embedding — skip duplicates
+        for emb_path in RECORDINGS_DIR.glob("*.npy"):
+            try:
+                existing = np.load(str(emb_path))
+                if similarity(existing, embedding) >= SPEAKER_THRESHOLD:
+                    return  # already have a sample of this voice
+            except Exception:
+                pass
+
         raw = whisperx.load_audio(audio_path)  # float32 mono 16kHz
         sr = 16000
         # Collect up to 20s of this speaker's audio
