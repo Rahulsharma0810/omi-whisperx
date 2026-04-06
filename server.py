@@ -144,10 +144,10 @@ CAPTURE_TRIGGER = re.compile(
 # Content filter — drops entertainment chunks so Omi doesn't save them
 # Toggle: CONTENT_FILTER=false to disable entirely
 # ---------------------------------------------------------------------------
-CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "true").lower() == "true"
+CONTENT_FILTER_ENABLED = os.environ.get("CONTENT_FILTER", "false").lower() == "true"
 
 # Tier 1 — Zero-shot NLI (fast, local, runs inside this process)
-NLI_ENABLED = os.environ.get("NLI_ENABLED", "true").lower() == "true"
+NLI_ENABLED = os.environ.get("NLI_ENABLED", "false").lower() == "true"
 NLI_MODEL = os.environ.get("NLI_MODEL", "typeform/distilbert-base-uncased-mnli")
 NLI_THRESHOLD = float(os.environ.get("NLI_THRESHOLD", "0.85"))
 
