@@ -1093,7 +1093,15 @@ async def list_recordings():
     recs = []
     for meta_path in sorted(RECORDINGS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
-            recs.append(json.loads(meta_path.read_text()))
+            meta = json.loads(meta_path.read_text())
+            # Attach best-matching enrolled speaker and score
+            emb_path = RECORDINGS_DIR / f"{meta['id']}.npy"
+            if emb_path.exists() and named_speakers:
+                emb = np.load(str(emb_path))
+                scores = {n: round(similarity(p, emb), 3) for n, p in named_speakers.items()}
+                best_name = max(scores, key=scores.__getitem__)
+                meta["best_match"] = {"name": best_name, "score": scores[best_name], "all": scores}
+            recs.append(meta)
         except Exception:
             pass
     return {"recordings": recs}

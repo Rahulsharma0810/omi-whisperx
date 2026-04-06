@@ -125,8 +125,10 @@ input[type=file] { padding: 4px; cursor: pointer; }
   <!-- Unidentified recordings -->
   <section>
     <h2>Unidentified recordings — listen &amp; assign</h2>
-    <div style="margin-bottom:10px">
+    <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <button class="btn" onclick="purge()">clean up matched voices</button>
+      <button class="btn btn-primary" onclick="confirmAll()">confirm all suggestions</button>
+      <span style="color:#8b949e;font-size:11px;">assigns recordings where best match ≥ 60%</span>
     </div>
     <div id="rec-list"><p class="empty">Loading…</p></div>
   </section>
@@ -173,12 +175,20 @@ async function loadRecordings() {
   }
   el.innerHTML = recordings.map(r => {
     const ts = new Date(r.timestamp).toLocaleString();
+    const match = r.best_match;
+    const pct = match ? Math.round(match.score * 100) : 0;
+    const colour = pct >= 72 ? '#3fb950' : pct >= 55 ? '#d29922' : '#8b949e';
+    const suggestion = match
+      ? `<span style="color:${colour};font-size:11px;">closest: <b>${match.name}</b> ${pct}%</span>
+         <button class="btn btn-primary" onclick="confirmRec('${r.id}','${match.name}')" style="font-size:11px;padding:2px 8px;">confirm</button>`
+      : '';
     return `
-    <div class="rec-card" id="rec-${r.id}">
+    <div class="rec-card" id="rec-${r.id}" data-match="${match ? match.name : ''}" data-score="${pct}">
       <div class="rec-meta">
         <span class="rec-label">${r.speaker_label}</span>
         <span class="rec-time">${ts}</span>
         <span class="rec-dur">${r.duration}s</span>
+        ${suggestion}
       </div>
       <audio controls src="/speakers/recordings/${r.id}/audio" preload="none"></audio>
       <div class="rec-assign">
@@ -190,22 +200,42 @@ async function loadRecordings() {
   }).join('');
 }
 
-async function assignRec(id) {
-  const name = document.getElementById(`name-${id}`).value.trim();
-  if (!name) return;
+async function _doAssign(id, name) {
   const fd = new FormData();
   fd.append('name', name);
   const res = await fetch(`/speakers/recordings/${id}/assign`, { method: 'POST', body: fd });
-  const data = await res.json();
-  if (res.ok) {
+  return res.ok;
+}
+
+async function assignRec(id) {
+  const name = document.getElementById(`name-${id}`).value.trim();
+  if (!name) return;
+  if (await _doAssign(id, name)) {
     document.getElementById(`rec-${id}`)?.remove();
     loadSpeakers();
     if (!document.querySelector('.rec-card'))
-      document.getElementById('rec-list').innerHTML =
-        '<p class="empty">No unidentified recordings.</p>';
-  } else {
-    alert('Error: ' + (data.error || 'unknown'));
+      document.getElementById('rec-list').innerHTML = '<p class="empty">No unidentified recordings.</p>';
   }
+}
+
+async function confirmRec(id, name) {
+  if (await _doAssign(id, name)) {
+    document.getElementById(`rec-${id}`)?.remove();
+    loadSpeakers();
+    if (!document.querySelector('.rec-card'))
+      document.getElementById('rec-list').innerHTML = '<p class="empty">No unidentified recordings.</p>';
+  }
+}
+
+async function confirmAll() {
+  const cards = [...document.querySelectorAll('.rec-card[data-score]')];
+  const toConfirm = cards.filter(c => parseInt(c.dataset.score) >= 60 && c.dataset.match);
+  if (!toConfirm.length) { alert('No suggestions above 60%.'); return; }
+  for (const card of toConfirm) {
+    await _doAssign(card.id.replace('rec-', ''), card.dataset.match);
+  }
+  await loadRecordings();
+  await loadSpeakers();
 }
 
 async function purge() {
