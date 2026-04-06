@@ -472,8 +472,6 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
 def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
     """Save one audio clip per unique unknown voice. Skip if a similar voice is already stored."""
     try:
-        # Use a looser threshold for deduplication — better to skip a borderline
-        # new voice than to flood the list with clips of already-known people.
         dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
 
         # Skip if this voice is already enrolled as a named speaker
@@ -481,12 +479,15 @@ def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_
             if similarity(profile, embedding) >= dedup_threshold:
                 return
 
-        # Skip if we already have a recording of this voice (same person, different chunk)
+        # Allow up to 5 recordings per unique unknown voice for better coverage
+        same_voice_count = 0
         for emb_path in RECORDINGS_DIR.glob("*.npy"):
             try:
                 existing = np.load(str(emb_path))
                 if similarity(existing, embedding) >= dedup_threshold:
-                    return
+                    same_voice_count += 1
+                    if same_voice_count >= 5:
+                        return  # already have 5 samples of this voice
             except Exception:
                 pass
 
@@ -1091,19 +1092,22 @@ def _purge_matched_recordings() -> int:
 @app.get("/speakers/recordings")
 async def list_recordings():
     recs = []
-    for meta_path in sorted(RECORDINGS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for meta_path in RECORDINGS_DIR.glob("*.json"):
         try:
             meta = json.loads(meta_path.read_text())
-            # Attach best-matching enrolled speaker and score
             emb_path = RECORDINGS_DIR / f"{meta['id']}.npy"
             if emb_path.exists() and named_speakers:
                 emb = np.load(str(emb_path))
                 scores = {n: round(similarity(p, emb), 3) for n, p in named_speakers.items()}
                 best_name = max(scores, key=scores.__getitem__)
                 meta["best_match"] = {"name": best_name, "score": scores[best_name], "all": scores}
+            else:
+                meta["best_match"] = None
             recs.append(meta)
         except Exception:
             pass
+    # Sort: highest similarity first, unmatched last
+    recs.sort(key=lambda r: r["best_match"]["score"] if r["best_match"] else 0, reverse=True)
     return {"recordings": recs}
 
 
