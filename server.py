@@ -465,12 +465,17 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
 def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
     """Save one audio clip per unique unknown voice. Skip if a similar voice is already stored."""
     try:
-        # Check if we already have a recording with a similar embedding — skip duplicates
+        # Skip if this voice is already enrolled as a named speaker
+        for profile in named_speakers.values():
+            if similarity(profile, embedding) >= SPEAKER_THRESHOLD:
+                return
+
+        # Skip if we already have a recording of this voice (same person, different chunk)
         for emb_path in RECORDINGS_DIR.glob("*.npy"):
             try:
                 existing = np.load(str(emb_path))
                 if similarity(existing, embedding) >= SPEAKER_THRESHOLD:
-                    return  # already have a sample of this voice
+                    return
             except Exception:
                 pass
 
@@ -1053,6 +1058,24 @@ async def speakers_ui():
     return HTMLResponse(p.read_text())
 
 
+def _purge_matched_recordings() -> int:
+    """Delete any saved recording whose embedding now matches an enrolled speaker."""
+    removed = 0
+    for emb_path in list(RECORDINGS_DIR.glob("*.npy")):
+        try:
+            emb = np.load(str(emb_path))
+            for profile in named_speakers.values():
+                if similarity(profile, emb) >= SPEAKER_THRESHOLD:
+                    rec_id = emb_path.stem
+                    for ext in (".json", ".wav", ".npy"):
+                        (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
+                    removed += 1
+                    break
+        except Exception:
+            pass
+    return removed
+
+
 @app.get("/speakers/recordings")
 async def list_recordings():
     recs = []
@@ -1087,8 +1110,16 @@ async def assign_recording(rec_id: str, name: str = Form(...)):
     save_profile(name, emb)
     for ext in (".json", ".wav", ".npy"):
         (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
-    logger.info(f"[REC] Assigned recording {rec_id} → '{name}'")
-    return JSONResponse({"status": "enrolled", "name": name})
+    purged = _purge_matched_recordings()
+    logger.info(f"[REC] Assigned recording {rec_id} → '{name}', purged {purged} duplicate(s)")
+    return JSONResponse({"status": "enrolled", "name": name, "purged": purged})
+
+
+@app.post("/speakers/recordings/purge")
+async def purge_recordings():
+    """Delete all recordings that now match an enrolled speaker."""
+    removed = _purge_matched_recordings()
+    return JSONResponse({"purged": removed})
 
 
 @app.delete("/speakers/recordings/{rec_id}")
@@ -1126,7 +1157,8 @@ async def enroll_speaker(name: str = Form(...), file: UploadFile = File(...)):
 
     named_speakers[name] = emb
     save_profile(name, emb)
-    logger.info(f"[SPEAKERS] Enrolled via upload: '{name}'")
+    purged = _purge_matched_recordings()
+    logger.info(f"[SPEAKERS] Enrolled via upload: '{name}', purged {purged} matching recording(s)")
     return JSONResponse({"status": "enrolled", "name": name})
 
 

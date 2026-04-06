@@ -125,6 +125,9 @@ input[type=file] { padding: 4px; cursor: pointer; }
   <!-- Unidentified recordings -->
   <section>
     <h2>Unidentified recordings — listen &amp; assign</h2>
+    <div style="margin-bottom:10px">
+      <button class="btn" onclick="purge()">clean up matched voices</button>
+    </div>
     <div id="rec-list"><p class="empty">Loading…</p></div>
   </section>
 
@@ -203,6 +206,13 @@ async function assignRec(id) {
   } else {
     alert('Error: ' + (data.error || 'unknown'));
   }
+}
+
+async function purge() {
+  const res = await fetch('/speakers/recordings/purge', { method: 'POST' });
+  const { purged } = await res.json();
+  await loadRecordings();
+  if (purged) alert(`Removed ${purged} recording(s) that matched enrolled speakers.`);
 }
 
 async function deleteRec(id) {
