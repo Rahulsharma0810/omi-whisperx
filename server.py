@@ -134,9 +134,14 @@ elif torch.cuda.is_available():
 else:
     TORCH_DEVICE = "cpu"
 
-# Trigger phrase: "remember/save/call/name this voice as NAME"
+# Trigger phrase — deliberate enrollment commands:
+#   "remember/save/call/name this voice as NAME"
+#   "recognize my voice as NAME"
 CAPTURE_TRIGGER = re.compile(
-    r"\b(?:remember|save|call|name)\s+this\s+voice\s+as\s+(.+)",
+    r"\b(?:"
+    r"(?:remember|save|call|name)\s+this\s+voice\s+as"
+    r"|recognize\s+(?:my\s+)?voice\s+as"
+    r")\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)",
     re.IGNORECASE,
 )
 
