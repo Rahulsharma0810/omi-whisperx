@@ -106,8 +106,11 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.80"))
 PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", "~/.omi/speakers")).expanduser()
 RECORDINGS_DIR = Path(os.environ.get("RECORDINGS_DIR", "~/.omi/recordings")).expanduser()
+BLOCKED_DIR = Path(os.environ.get("BLOCKED_DIR", "~/.omi/blocked")).expanduser()
 MAX_RECORDINGS = int(os.environ.get("MAX_RECORDINGS", "50"))
+RECORDINGS_MAX_AGE_DAYS = int(os.environ.get("RECORDINGS_MAX_AGE_DAYS", "7"))
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+BLOCKED_DIR.mkdir(parents=True, exist_ok=True)
 
 # Initial prompt for bilingual (Hindi+English / Hinglish) transcription.
 # Override via WHISPER_INITIAL_PROMPT env var. The default primes Whisper
@@ -469,10 +472,36 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
     }
 
 
+def _is_blocked(embedding: np.ndarray, threshold: float) -> bool:
+    """Return True if this embedding matches any blocked voice."""
+    for p in BLOCKED_DIR.glob("*.npy"):
+        try:
+            if similarity(np.load(str(p)), embedding) >= threshold:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _expire_old_recordings() -> None:
+    """Delete unassigned clips older than RECORDINGS_MAX_AGE_DAYS."""
+    cutoff = time.time() - RECORDINGS_MAX_AGE_DAYS * 86400
+    for meta_path in list(RECORDINGS_DIR.glob("*.json")):
+        if meta_path.stat().st_mtime < cutoff:
+            rec_id = meta_path.stem
+            for ext in (".json", ".wav", ".npy"):
+                (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
+            logger.info(f"[REC] Expired old clip {rec_id}")
+
+
 def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
-    """Save one audio clip per unique unknown voice. Skip if a similar voice is already stored."""
+    """Save one audio clip per unique unknown voice. Skip if blocked, enrolled, or already have 5 samples."""
     try:
         dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
+
+        # Skip blocked voices (TV actors, recurring background voices, etc.)
+        if _is_blocked(embedding, dedup_threshold):
+            return
 
         # Skip if this voice is already enrolled as a named speaker
         for profile in named_speakers.values():
@@ -490,6 +519,9 @@ def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_
                         return  # already have 5 samples of this voice
             except Exception:
                 pass
+
+        # Expire old clips before saving new ones
+        _expire_old_recordings()
 
         raw = whisperx.load_audio(audio_path)  # float32 mono 16kHz
         sr = 16000
@@ -1144,6 +1176,54 @@ async def purge_recordings():
     """Delete all recordings that now match an enrolled speaker."""
     removed = _purge_matched_recordings()
     return JSONResponse({"purged": removed})
+
+
+@app.post("/speakers/recordings/{rec_id}/block")
+async def block_recording(rec_id: str):
+    """Block this voice — save embedding to blocked list, delete clip. Never records this voice again."""
+    emb_path = RECORDINGS_DIR / f"{rec_id}.npy"
+    if not emb_path.exists():
+        return JSONResponse({"error": "recording not found"}, status_code=404)
+    emb = np.load(str(emb_path))
+
+    # Save to blocked dir
+    block_id = uuid4().hex[:12]
+    np.save(str(BLOCKED_DIR / f"{block_id}.npy"), emb)
+
+    # Delete the recording
+    for ext in (".json", ".wav", ".npy"):
+        (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
+
+    # Also purge any other recordings of the same voice
+    dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
+    purged = 0
+    for other_emb_path in list(RECORDINGS_DIR.glob("*.npy")):
+        try:
+            if similarity(np.load(str(other_emb_path)), emb) >= dedup_threshold:
+                rid = other_emb_path.stem
+                for ext in (".json", ".wav", ".npy"):
+                    (RECORDINGS_DIR / f"{rid}{ext}").unlink(missing_ok=True)
+                purged += 1
+        except Exception:
+            pass
+
+    logger.info(f"[REC] Blocked voice {rec_id}, purged {purged} similar clip(s)")
+    return JSONResponse({"status": "blocked", "purged": purged})
+
+
+@app.get("/speakers/blocked")
+async def list_blocked():
+    count = len(list(BLOCKED_DIR.glob("*.npy")))
+    return {"blocked_voices": count}
+
+
+@app.delete("/speakers/blocked")
+async def clear_blocked():
+    removed = 0
+    for p in list(BLOCKED_DIR.glob("*.npy")):
+        p.unlink(missing_ok=True)
+        removed += 1
+    return JSONResponse({"cleared": removed})
 
 
 @app.delete("/speakers/recordings/{rec_id}")

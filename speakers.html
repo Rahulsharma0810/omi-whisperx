@@ -129,8 +129,14 @@ input[type=file] { padding: 4px; cursor: pointer; }
     <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <button class="btn" onclick="purge()">clean up matched voices</button>
       <button class="btn btn-primary" onclick="confirmAll()">confirm all suggestions</button>
-      <span style="color:#8b949e;font-size:11px;">assigns recordings where best match ≥ 60%</span>
+      <span id="blocked-count" style="color:#8b949e;font-size:11px;margin-left:auto;"></span>
+      <button class="btn btn-danger" onclick="clearBlocked()" title="Remove all blocked voices so they can be recorded again">clear blocked</button>
     </div>
+    <p style="color:#8b949e;font-size:11px;margin-bottom:10px;">
+      <b>block</b> — never record this voice again (TV actors, background noise).
+      <b>discard</b> — delete this clip only.
+      Auto-expires after 7 days.
+    </p>
     <div id="rec-list"><p class="empty">Loading…</p></div>
   </section>
 
@@ -216,7 +222,8 @@ async function loadRecordings() {
       <div class="rec-assign">
         <input type="text" id="name-${r.id}" placeholder="Enter name…">
         <button class="btn btn-primary" onclick="assignRec('${r.id}')">assign</button>
-        <button class="btn btn-danger"  onclick="deleteRec('${r.id}')">discard</button>
+        <button class="btn btn-danger"  onclick="blockRec('${r.id}')" title="Block — never record this voice again">block</button>
+        <button class="btn"             onclick="deleteRec('${r.id}')">discard</button>
       </div>
     </div>`;
   }).join('');
@@ -267,12 +274,35 @@ async function purge() {
   if (purged) alert(`Removed ${purged} recording(s) that matched enrolled speakers.`);
 }
 
+async function blockRec(id) {
+  if (!confirm('Block this voice? It will never be recorded again.\nUse "clear blocked" to undo.')) return;
+  const res = await fetch(`/speakers/recordings/${id}/block`, { method: 'POST' });
+  const data = await res.json();
+  if (res.ok) {
+    await loadRecordings();
+    loadBlockedCount();
+  }
+}
+
 async function deleteRec(id) {
   await fetch(`/speakers/recordings/${id}`, { method: 'DELETE' });
   document.getElementById(`rec-${id}`)?.remove();
   if (!document.querySelector('.rec-card'))
     document.getElementById('rec-list').innerHTML =
       '<p class="empty">No unidentified recordings.</p>';
+}
+
+async function clearBlocked() {
+  if (!confirm('Remove all blocked voices? They may be recorded again.')) return;
+  await fetch('/speakers/blocked', { method: 'DELETE' });
+  loadBlockedCount();
+}
+
+async function loadBlockedCount() {
+  const res = await fetch('/speakers/blocked');
+  const { blocked_voices } = await res.json();
+  const el = document.getElementById('blocked-count');
+  el.textContent = blocked_voices ? `${blocked_voices} voice${blocked_voices > 1 ? 's' : ''} blocked` : '';
 }
 
 // ── Enrolled speakers ────────────────────────────────────────────────────────
@@ -423,6 +453,7 @@ function showStatus(msg, ok) {
 
 loadRecordings();
 loadSpeakers();
+loadBlockedCount();
 </script>
 </body>
 </html>
