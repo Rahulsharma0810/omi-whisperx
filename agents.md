@@ -46,7 +46,11 @@ Omi device → cloudflared tunnel → uvicorn (port 8080) → FastAPI
                                                           ├── GET  /speakers/recordings/{id}/audio    (serve WAV)
                                                           ├── POST /speakers/recordings/{id}/assign   (assign name → enroll)
                                                           ├── POST /speakers/recordings/purge         (delete matched clips)
+                                                          ├── POST /speakers/recordings/{id}/block    (block voice forever)
                                                           ├── DELETE /speakers/recordings/{id}        (discard clip)
+                                                          │
+                                                          ├── GET  /speakers/blocked                  (count of blocked voices)
+                                                          ├── DELETE /speakers/blocked                (clear all blocks)
                                                           │
                                                           ├── GET  /health             (full system status + version)
                                                           └── GET  /filter             (content filter config)
@@ -248,7 +252,9 @@ Three methods:
 - `SPEAKER_THRESHOLD` (0.80) — cosine similarity required to resolve a name in transcripts
 - Dedup threshold is `max(0.72, SPEAKER_THRESHOLD - 0.08)` — slightly looser to avoid saving clips of already-enrolled people
 - Max 5 clips saved per unique unknown voice; max 50 clips total (oldest evicted)
+- Clips auto-expire after `RECORDINGS_MAX_AGE_DAYS` days (default 7)
 - Multiple assignments to same name → embeddings are averaged, not overwritten
+- **Blocked voices** (`~/.omi/blocked/`) — embeddings of voices to permanently ignore (TV actors, etc.). Checked before saving any new recording. `clear blocked` removes all blocks.
 
 ## Docker / Portainer
 

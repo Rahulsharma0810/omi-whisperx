@@ -252,7 +252,10 @@ Up to 5 clips are saved per unique unknown voice. Visit `/ui/speakers` to listen
 | `GET` | `/speakers/recordings/{id}/audio` | Stream WAV audio for playback |
 | `POST` | `/speakers/recordings/{id}/assign` | Assign name → enroll speaker, delete clip. Form field: `name` |
 | `POST` | `/speakers/recordings/purge` | Delete all clips that now match an enrolled speaker |
+| `POST` | `/speakers/recordings/{id}/block` | Block voice permanently — saves to blocked list, deletes clip and all similar clips |
 | `DELETE` | `/speakers/recordings/{id}` | Discard a clip without enrolling |
+| `GET` | `/speakers/blocked` | Count of blocked voices |
+| `DELETE` | `/speakers/blocked` | Clear all blocked voices |
 
 ---
 
@@ -358,6 +361,8 @@ The next unrecognised speaker in that chunk is enrolled as NAME.
 **3. Assign from recordings** — every time an unknown voice is heard, a short clip is saved automatically (max 5 per unique voice). Go to `/ui/speakers`, play each clip, and click **confirm** to assign a name. The similarity score shown next to each clip tells you how closely it matches enrolled speakers — use **confirm all suggestions** to bulk-assign in one click.
 
 Multiple assignments to the same name average the embeddings together, building a more robust voiceprint over time.
+
+**Blocking TV/movie voices** — when watching TV or a movie, unknown actor voices will appear in recordings. Click **block** on any clip to permanently ignore that voice. The embedding is saved to `~/.omi/blocked/` and that voice is never recorded again. Use **clear blocked** in the UI to undo all blocks. Unassigned clips auto-expire after `RECORDINGS_MAX_AGE_DAYS` days (default 7).
 
 ---
 
