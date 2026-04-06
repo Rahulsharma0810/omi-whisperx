@@ -196,19 +196,24 @@ Omit the `language` param to let Whisper auto-detect per chunk — best for mult
 
 ---
 
+## Web UI
+
+| URL | Description |
+|---|---|
+| `/ui` | Live monitor — real-time pipeline events as audio is processed |
+| `/ui/speakers` | Speaker manager — listen to unidentified clips, assign names, enroll, rename, delete |
+| `/benchmark` | Benchmark tool — upload/record/synthetic audio, per-stage RTF, side-by-side comparison |
+| `/health` | Full system status — model, devices, speaker count, filter config, app version |
+
+---
+
 ## API Reference
 
 ### `POST /inference`
 
 Main transcription endpoint. Accepts a multipart audio file.
 
-**Query parameters:**
-
-| Param | Default | Description |
-|---|---|---|
-| `language` | auto-detect | Force language (e.g. `en`, `hi`) |
-| `temperature` | `0.0` | Whisper temperature |
-| `response_format` | `verbose_json` | Response format |
+**Form fields:** `file` (audio), `language` (optional), `temperature` (default `0.0`), `response_format` (default `verbose_json`)
 
 **Response:**
 
@@ -227,54 +232,68 @@ When content is filtered (entertainment detected), returns `{"segments": [], "te
 
 ---
 
-### `GET /speakers`
+### Speaker profiles
 
-List enrolled speaker profiles and voice capture state.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/speakers` | List enrolled speaker names and capture state |
+| `POST` | `/speakers` | Enroll from audio — form fields: `name`, `file` (WAV/M4A/MP3) |
+| `PATCH` | `/speakers/{name}` | Rename — form field: `new_name` |
+| `DELETE` | `/speakers/{name}` | Delete one profile |
+| `DELETE` | `/speakers` | Reset all profiles and capture state |
 
-### `DELETE /speakers/{name}`
+### Unidentified recordings
 
-Remove a single speaker profile.
+Up to 5 clips are saved per unique unknown voice. Visit `/ui/speakers` to listen and assign names.
 
-### `DELETE /speakers`
-
-Reset all profiles and capture state.
-
----
-
-### `GET /filter`
-
-Returns current content filter configuration (NLI + Ollama settings).
-
----
-
-### `GET /health`
-
-Full system status: model loaded, device, speaker count, filter config, app version.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/speakers/recordings` | List clips with best-match speaker suggestion and similarity score |
+| `GET` | `/speakers/recordings/{id}/audio` | Stream WAV audio for playback |
+| `POST` | `/speakers/recordings/{id}/assign` | Assign name → enroll speaker, delete clip. Form field: `name` |
+| `POST` | `/speakers/recordings/purge` | Delete all clips that now match an enrolled speaker |
+| `DELETE` | `/speakers/recordings/{id}` | Discard a clip without enrolling |
 
 ---
 
-### `GET /ui`
+### Live dashboard
 
-Live monitoring dashboard. Shows each chunk as it flows through the pipeline in real time.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/events` | SSE stream for `/ui` dashboard |
 
-### `GET /events`
-
-Server-Sent Events stream powering the dashboard. Emits:
+Events emitted per chunk:
 
 | Event | When | Key fields |
 |---|---|---|
 | `audio_received` | Start of inference | `chunk_id`, `size_kb` |
 | `transcribed` | After WhisperX | `chunk_id`, `lang`, `segments` |
-| `nli_result` | After NLI | `chunk_id`, `decision`, `confidence` |
-| `ollama_result` | After Ollama | `chunk_id`, `decision` |
+| `nli_result` | After NLI | `chunk_id`, `decision`, `confidence`, `scores` |
+| `ollama_result` | After Ollama | `chunk_id`, `decision`, `raw_response` |
 | `filtered` | Chunk dropped | `chunk_id`, `preview` |
 | `transcript` | Chunk saved | `chunk_id`, `lang`, `duration`, `segments[]` |
 
 ---
 
-### `POST /benchmark/run` · `GET /benchmark/status` · `GET /benchmark/events`
+### Benchmark
 
-Built-in benchmark API. See `/benchmark` for the interactive UI.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/benchmark` | Benchmark UI |
+| `GET` | `/benchmark/events` | SSE stream for benchmark progress |
+| `POST` | `/benchmark/run` | Start benchmark — form fields: `trials`, `language`, `duration`, optional audio `file` |
+| `GET` | `/benchmark/status` | `{"running": true/false}` |
+| `POST` | `/benchmark/cancel` | Cancel a running benchmark |
+
+---
+
+### `GET /health`
+
+Full system status: model, devices, speaker profiles, filter config, app version.
+
+### `GET /filter`
+
+Content filter configuration (enabled flags, NLI model, Ollama URL/model/timeout).
 
 ---
 
@@ -327,13 +346,18 @@ All settings are environment variables. Copy `.env.example` to `.env` to get sta
 
 ## Speaker Enrollment
 
-Say the trigger phrase during any conversation:
+Three ways to enroll a speaker:
 
-> *"remember this voice as NAME"*
-> *"save this voice as NAME"*
-> *"call this voice NAME"*
+**1. Trigger phrase** — say during any conversation:
+> *"remember this voice as NAME"* / *"save this voice as NAME"* / *"recognize my voice as NAME"*
 
-The next unrecognised speaker in that audio chunk is enrolled as NAME and saved to `PROFILES_DIR`. From that point on, their voice is resolved by name in all future transcripts.
+The next unrecognised speaker in that chunk is enrolled as NAME.
+
+**2. Upload or record at `/ui/speakers`** — upload any audio clip (WAV, M4A, MP3, voice note) or record directly from your browser mic. No cooperation from the other person required.
+
+**3. Assign from recordings** — every time an unknown voice is heard, a short clip is saved automatically (max 5 per unique voice). Go to `/ui/speakers`, play each clip, and click **confirm** to assign a name. The similarity score shown next to each clip tells you how closely it matches enrolled speakers — use **confirm all suggestions** to bulk-assign in one click.
+
+Multiple assignments to the same name average the embeddings together, building a more robust voiceprint over time.
 
 ---
 

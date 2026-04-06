@@ -107,6 +107,7 @@ input[type=file] { padding: 4px; cursor: pointer; }
 }
 #status.ok  { background: #1a2b1a; border: 1px solid #2ea043; color: #3fb950; display: block; }
 #status.err { background: #2b1a1a; border: 1px solid #6e2b2b; color: #f85149; display: block; }
+#mic-btn.recording { background: #3d1a1a; border-color: #f85149; color: #f85149; }
 </style>
 </head>
 <body>
@@ -142,20 +143,41 @@ input[type=file] { padding: 4px; cursor: pointer; }
     </div>
   </section>
 
-  <!-- Enroll from audio file -->
+  <!-- Enroll from audio file or mic -->
   <section>
-    <h2>Enroll from audio file</h2>
+    <h2>Enroll new speaker</h2>
     <div class="card">
       <div class="field">
         <label>Name</label>
         <input type="text" id="enroll-name" placeholder="Rahul Sharma">
       </div>
-      <div class="field">
-        <label>Audio clip</label>
-        <input type="file" id="enroll-file" accept="audio/*">
-        <span class="hint">Any format — WAV, M4A, MP3. 5–30s of clear speech works best.</span>
+
+      <!-- Source tabs -->
+      <div style="display:flex;gap:6px;margin-bottom:10px;">
+        <button class="btn btn-primary" id="tab-upload" onclick="setEnrollTab('upload')">Upload file</button>
+        <button class="btn"             id="tab-record" onclick="setEnrollTab('record')">Record mic</button>
       </div>
-      <button class="btn btn-primary" onclick="enroll()">Enroll</button>
+
+      <!-- Upload -->
+      <div id="panel-upload">
+        <div class="field">
+          <input type="file" id="enroll-file" accept="audio/*">
+          <span class="hint">WAV, M4A, MP3 — 5–30s of clear speech works best.</span>
+        </div>
+      </div>
+
+      <!-- Record -->
+      <div id="panel-record" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+          <button class="btn" id="mic-btn" onclick="toggleMic()">&#9679; Record</button>
+          <span id="mic-timer" style="color:#8b949e;font-size:12px;min-width:40px;"></span>
+          <span id="mic-ready" style="color:#3fb950;font-size:12px;display:none;">ready</span>
+        </div>
+        <audio id="mic-preview" controls style="width:100%;height:32px;display:none;" preload="none"></audio>
+        <span class="hint">Requires HTTPS or localhost. 5–30s recommended.</span>
+      </div>
+
+      <button class="btn btn-primary" onclick="enroll()" style="margin-top:10px;">Enroll</button>
       <div id="status"></div>
     </div>
   </section>
@@ -302,23 +324,90 @@ async function resetAll() {
   loadSpeakers();
 }
 
-// ── Enroll from file ─────────────────────────────────────────────────────────
+// ── Enroll tabs ───────────────────────────────────────────────────────────────
+
+let enrollTab = 'upload';
+function setEnrollTab(tab) {
+  enrollTab = tab;
+  document.getElementById('panel-upload').style.display = tab === 'upload' ? '' : 'none';
+  document.getElementById('panel-record').style.display = tab === 'record' ? '' : 'none';
+  document.getElementById('tab-upload').className = tab === 'upload' ? 'btn btn-primary' : 'btn';
+  document.getElementById('tab-record').className = tab === 'record' ? 'btn btn-primary' : 'btn';
+}
+
+// ── Mic recording ─────────────────────────────────────────────────────────────
+
+let mediaRecorder = null, recordedBlob = null, recordedChunks = [], micTimer = null, micSecs = 0;
+
+async function toggleMic() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices) {
+    showStatus('Mic requires HTTPS — use Upload instead.', false);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedBlob = null; recordedChunks = []; micSecs = 0;
+    document.getElementById('mic-ready').style.display = 'none';
+    document.getElementById('mic-preview').style.display = 'none';
+
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+      const url = URL.createObjectURL(recordedBlob);
+      const preview = document.getElementById('mic-preview');
+      preview.src = url; preview.style.display = '';
+      document.getElementById('mic-ready').style.display = '';
+      document.getElementById('mic-btn').classList.remove('recording');
+      document.getElementById('mic-btn').textContent = '⏺ Record';
+      clearInterval(micTimer); document.getElementById('mic-timer').textContent = '';
+    };
+    mediaRecorder.start(100);
+    document.getElementById('mic-btn').classList.add('recording');
+    document.getElementById('mic-btn').textContent = '⏹ Stop';
+    micTimer = setInterval(() => {
+      micSecs++;
+      const m = Math.floor(micSecs / 60), s = String(micSecs % 60).padStart(2, '0');
+      document.getElementById('mic-timer').textContent = `${m}:${s}`;
+    }, 1000);
+  } catch (err) {
+    showStatus('Mic error: ' + err.message, false);
+  }
+}
+
+// ── Enroll submit ─────────────────────────────────────────────────────────────
 
 async function enroll() {
   const name = document.getElementById('enroll-name').value.trim();
-  const file = document.getElementById('enroll-file').files[0];
   if (!name) return showStatus('Enter a name.', false);
-  if (!file)  return showStatus('Select an audio file.', false);
+
+  let audioBlob;
+  if (enrollTab === 'upload') {
+    audioBlob = document.getElementById('enroll-file').files[0];
+    if (!audioBlob) return showStatus('Select an audio file.', false);
+  } else {
+    if (!recordedBlob) return showStatus('Record audio first.', false);
+    audioBlob = recordedBlob;
+  }
+
   showStatus('Enrolling…', null);
   const fd = new FormData();
   fd.append('name', name);
-  fd.append('file', file);
+  fd.append('file', audioBlob, audioBlob.name || 'recording.webm');
   const res = await fetch('/speakers', { method: 'POST', body: fd });
   const data = await res.json();
   if (res.ok) {
     showStatus(`Enrolled "${data.name}".`, true);
     document.getElementById('enroll-name').value = '';
     document.getElementById('enroll-file').value = '';
+    recordedBlob = null;
+    document.getElementById('mic-preview').style.display = 'none';
+    document.getElementById('mic-ready').style.display = 'none';
     loadSpeakers();
   } else {
     showStatus('Error: ' + (data.error || 'unknown'), false);
@@ -329,6 +418,7 @@ function showStatus(msg, ok) {
   const el = document.getElementById('status');
   el.textContent = msg;
   el.className = ok === true ? 'ok' : ok === false ? 'err' : '';
+  if (msg) el.style.display = 'block';
 }
 
 loadRecordings();

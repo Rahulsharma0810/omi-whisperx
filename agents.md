@@ -23,12 +23,33 @@ device via a Cloudflare tunnel.
 
 ```
 Omi device → cloudflared tunnel → uvicorn (port 8080) → FastAPI
-                                                          ├── /inference  (transcribe + diarize)
-                                                          ├── /speakers   (list/delete profiles)
-                                                          ├── /filter     (content filter status)
-                                                          ├── /health     (model info)
-                                                          ├── /ui         (live dashboard HTML)
-                                                          └── /events     (SSE stream for dashboard)
+                                                          │
+                                                          ├── POST /inference          (transcribe + diarize + name)
+                                                          │
+                                                          ├── GET  /ui                 (live monitor dashboard)
+                                                          ├── GET  /ui/speakers        (speaker management UI)
+                                                          ├── GET  /events             (SSE stream for /ui)
+                                                          │
+                                                          ├── GET  /benchmark          (benchmark UI)
+                                                          ├── POST /benchmark/run      (start benchmark)
+                                                          ├── POST /benchmark/cancel   (cancel running benchmark)
+                                                          ├── GET  /benchmark/status   (running / idle)
+                                                          ├── GET  /benchmark/events   (SSE stream for benchmark)
+                                                          │
+                                                          ├── GET  /speakers                          (list enrolled)
+                                                          ├── POST /speakers                          (enroll from audio)
+                                                          ├── PATCH /speakers/{name}                  (rename)
+                                                          ├── DELETE /speakers/{name}                 (delete one)
+                                                          ├── DELETE /speakers                        (reset all)
+                                                          │
+                                                          ├── GET  /speakers/recordings               (list unidentified clips)
+                                                          ├── GET  /speakers/recordings/{id}/audio    (serve WAV)
+                                                          ├── POST /speakers/recordings/{id}/assign   (assign name → enroll)
+                                                          ├── POST /speakers/recordings/purge         (delete matched clips)
+                                                          ├── DELETE /speakers/recordings/{id}        (discard clip)
+                                                          │
+                                                          ├── GET  /health             (full system status + version)
+                                                          └── GET  /filter             (content filter config)
 ```
 
 Models are loaded **once at startup** (not per request):
@@ -144,6 +165,18 @@ Returns `{"segments": [], "text": ""}` for entertainment so Omi saves nothing.
 
 **Safe defaults:** on any failure (NLI error, Ollama unreachable, unclear answer) the classifier returns `keep` — never drops content silently.
 
+## Key files
+
+| File | Purpose |
+|---|---|
+| `server.py` | Main FastAPI app — all routes, pipeline, SSE, speaker logic, content filter |
+| `ui.html` | Live monitor — `/ui` — SSE pipeline events in real time |
+| `benchmark.html` | Benchmark UI — `/benchmark` — upload/record/synthetic audio, per-stage RTF |
+| `speakers.html` | Speaker manager — `/ui/speakers` — recordings, enroll, rename, delete |
+| `benchmark.py` | Standalone CLI benchmark — RTF measurement, `--compare` mode |
+| `start.sh` | Dev launcher — loads `.env`, activates venv, starts uvicorn on port 8080 |
+| `Dockerfile` | Multi-arch image — CPU-only torch on arm64, APP_VERSION build arg |
+
 ## Live Dashboard (`/ui`)
 
 `GET /ui` — serves `ui.html`, a self-contained HTML/JS dashboard.
@@ -203,10 +236,19 @@ Notes:
 
 ## Speaker Enrollment
 
-Say the trigger phrase during a conversation:
-> "remember/save/call/name this voice as NAME"
+Three methods:
 
-The next unrecognised speaker in that chunk is enrolled as NAME and saved to `PROFILES_DIR`.
+1. **Trigger phrase** — say during conversation: *"remember/save/call/name this voice as NAME"* or *"recognize [my] voice as NAME"*. The next unrecognised speaker is enrolled and saved to `PROFILES_DIR`.
+
+2. **Upload audio** — `POST /speakers` with `name` + `file` fields. Any ffmpeg-supported format (WAV, M4A, MP3). Extracts embedding and saves profile.
+
+3. **Unidentified recordings** — every chunk with an unrecognised speaker saves up to 5 clips (one per unique voice, deduped by embedding similarity). Visit `/ui/speakers`, listen, and assign names. Each assignment averages the new embedding into the existing profile for a more robust voiceprint.
+
+**Key constants:**
+- `SPEAKER_THRESHOLD` (0.80) — cosine similarity required to resolve a name in transcripts
+- Dedup threshold is `max(0.72, SPEAKER_THRESHOLD - 0.08)` — slightly looser to avoid saving clips of already-enrolled people
+- Max 5 clips saved per unique unknown voice; max 50 clips total (oldest evicted)
+- Multiple assignments to same name → embeddings are averaged, not overwritten
 
 ## Docker / Portainer
 
