@@ -408,8 +408,15 @@ def load_profiles() -> dict[str, np.ndarray]:
 
 
 def save_profile(name: str, embedding: np.ndarray) -> None:
+    """Save embedding. If a profile already exists, average with it for a more robust voiceprint."""
     filename = name.strip().replace(" ", "_") + ".npy"
-    np.save(PROFILES_DIR / filename, embedding)
+    path = PROFILES_DIR / filename
+    if path.exists():
+        existing = np.load(str(path))
+        embedding = (existing + embedding) / 2.0
+        embedding /= np.linalg.norm(embedding)  # re-normalise after averaging
+    np.save(str(path), embedding)
+    named_speakers[name] = embedding  # keep in-memory copy in sync
     logger.info(f"Saved speaker profile: {name}")
 
 
@@ -465,16 +472,20 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
 def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
     """Save one audio clip per unique unknown voice. Skip if a similar voice is already stored."""
     try:
+        # Use a looser threshold for deduplication — better to skip a borderline
+        # new voice than to flood the list with clips of already-known people.
+        dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
+
         # Skip if this voice is already enrolled as a named speaker
         for profile in named_speakers.values():
-            if similarity(profile, embedding) >= SPEAKER_THRESHOLD:
+            if similarity(profile, embedding) >= dedup_threshold:
                 return
 
         # Skip if we already have a recording of this voice (same person, different chunk)
         for emb_path in RECORDINGS_DIR.glob("*.npy"):
             try:
                 existing = np.load(str(emb_path))
-                if similarity(existing, embedding) >= SPEAKER_THRESHOLD:
+                if similarity(existing, embedding) >= dedup_threshold:
                     return
             except Exception:
                 pass
@@ -1060,12 +1071,13 @@ async def speakers_ui():
 
 def _purge_matched_recordings() -> int:
     """Delete any saved recording whose embedding now matches an enrolled speaker."""
+    dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
     removed = 0
     for emb_path in list(RECORDINGS_DIR.glob("*.npy")):
         try:
             emb = np.load(str(emb_path))
             for profile in named_speakers.values():
-                if similarity(profile, emb) >= SPEAKER_THRESHOLD:
+                if similarity(profile, emb) >= dedup_threshold:
                     rec_id = emb_path.stem
                     for ext in (".json", ".wav", ".npy"):
                         (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
