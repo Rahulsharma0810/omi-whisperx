@@ -24,7 +24,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py benchmark.py ui.html benchmark.html ./
+COPY server.py benchmark.py ui.html benchmark.html speakers.html ./
 
 # APP_VERSION changes every commit — declare it last so it doesn't bust the package cache
 ARG APP_VERSION=dev

@@ -977,6 +977,65 @@ async def list_speakers():
     }
 
 
+@app.get("/speakers/ui", response_class=HTMLResponse)
+async def speakers_ui():
+    p = Path(__file__).parent / "speakers.html"
+    return HTMLResponse(p.read_text())
+
+
+@app.post("/speakers")
+async def enroll_speaker(name: str = Form(...), file: UploadFile = File(...)):
+    """Enroll a speaker from any audio clip (WAV, M4A, MP3, etc.)."""
+    name = name.strip().title()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+
+    audio_bytes = await file.read()
+    suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(audio_bytes)
+        audio_path = f.name
+
+    try:
+        raw = whisperx.load_audio(audio_path)  # float32 mono 16kHz
+        wav = preprocess_wav(raw.astype(np.float32), source_sr=16000)
+        emb = voice_encoder.embed_utterance(wav)
+    except Exception as e:
+        os.unlink(audio_path)
+        return JSONResponse({"error": f"embedding failed: {e}"}, status_code=500)
+    finally:
+        try:
+            os.unlink(audio_path)
+        except Exception:
+            pass
+
+    named_speakers[name] = emb
+    save_profile(name, emb)
+    logger.info(f"[SPEAKERS] Enrolled via upload: '{name}'")
+    return JSONResponse({"status": "enrolled", "name": name})
+
+
+@app.patch("/speakers/{name}")
+async def rename_speaker(name: str, new_name: str = Form(...)):
+    """Rename an existing speaker profile."""
+    old_key = name.replace("-", " ").replace("%20", " ")
+    new_key = new_name.strip().title()
+    if not new_key:
+        return JSONResponse({"error": "new_name required"}, status_code=400)
+    if old_key not in named_speakers:
+        return JSONResponse({"error": "speaker not found"}, status_code=404)
+
+    emb = named_speakers.pop(old_key)
+    named_speakers[new_key] = emb
+
+    old_file = PROFILES_DIR / (old_key.replace(" ", "_") + ".npy")
+    if old_file.exists():
+        old_file.unlink()
+    save_profile(new_key, emb)
+    logger.info(f"[SPEAKERS] Renamed '{old_key}' → '{new_key}'")
+    return JSONResponse({"status": "renamed", "old": old_key, "new": new_key})
+
+
 @app.delete("/speakers/{name}")
 async def delete_speaker(name: str):
     key = name.replace("-", " ").replace("%20", " ")

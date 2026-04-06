@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omi-whisperx speakers</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
+}
+header h1 { font-size: 14px; font-weight: 600; color: #e6edf3; }
+nav { display: flex; gap: 8px; margin-left: auto; }
+nav a {
+  color: #8b949e; font-size: 11px; text-decoration: none;
+  padding: 2px 8px; border-radius: 4px; border: 1px solid #21262d;
+}
+nav a:hover { color: #e6edf3; border-color: #8b949e; }
+
+main { padding: 24px; max-width: 680px; }
+
+h2 { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+
+/* Enrolled speakers list */
+#speaker-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 32px; }
+
+.speaker-row {
+  display: flex; align-items: center; gap: 8px;
+  background: #161b22; border: 1px solid #21262d;
+  border-radius: 6px; padding: 8px 12px;
+}
+.speaker-name { flex: 1; font-size: 13px; }
+.speaker-row input[type=text] {
+  flex: 1; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 4px; padding: 4px 8px; color: #e6edf3;
+  font-family: inherit; font-size: 13px;
+}
+.btn {
+  padding: 4px 10px; border-radius: 4px; border: 1px solid #21262d;
+  background: #21262d; color: #8b949e; cursor: pointer;
+  font-family: inherit; font-size: 12px;
+}
+.btn:hover { background: #30363d; color: #e6edf3; }
+.btn-danger { border-color: #6e2b2b; background: #2b1a1a; color: #f85149; }
+.btn-danger:hover { background: #6e2b2b; color: #fff; }
+.btn-primary { border-color: #1f6feb; background: #1f3557; color: #58a6ff; }
+.btn-primary:hover { background: #1f6feb; color: #fff; }
+
+.empty { color: #8b949e; font-size: 12px; padding: 12px 0; }
+
+/* Enroll form */
+.enroll-box {
+  background: #161b22; border: 1px solid #21262d;
+  border-radius: 6px; padding: 16px;
+}
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+label { font-size: 11px; color: #8b949e; }
+input[type=text], input[type=file] {
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  padding: 6px 10px; color: #e6edf3; font-family: inherit; font-size: 13px;
+}
+input[type=file] { padding: 4px; cursor: pointer; }
+.hint { font-size: 11px; color: #8b949e; margin-top: 2px; }
+
+#status {
+  margin-top: 12px; padding: 6px 10px; border-radius: 4px;
+  font-size: 12px; display: none;
+}
+#status.ok  { background: #1a2b1a; border: 1px solid #2ea043; color: #3fb950; display: block; }
+#status.err { background: #2b1a1a; border: 1px solid #6e2b2b; color: #f85149; display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>omi-whisperx speakers</h1>
+  <nav>
+    <a href="/ui">monitor</a>
+    <a href="/benchmark">benchmark</a>
+    <a href="/health">health</a>
+  </nav>
+</header>
+
+<main>
+  <h2>Enrolled speakers</h2>
+  <div id="speaker-list"><p class="empty">Loading…</p></div>
+
+  <h2>Enroll new speaker</h2>
+  <div class="enroll-box">
+    <div class="field">
+      <label>Name</label>
+      <input type="text" id="enroll-name" placeholder="Rahul Sharma">
+    </div>
+    <div class="field">
+      <label>Audio clip</label>
+      <input type="file" id="enroll-file" accept="audio/*">
+      <span class="hint">Any format — WAV, M4A, MP3. 5–30s of clear speech works best.</span>
+    </div>
+    <button class="btn btn-primary" onclick="enroll()">Enroll</button>
+    <div id="status"></div>
+  </div>
+</main>
+
+<script>
+async function loadSpeakers() {
+  const res = await fetch('/speakers');
+  const data = await res.json();
+  const list = document.getElementById('speaker-list');
+  const names = data.named_speakers || [];
+  if (!names.length) {
+    list.innerHTML = '<p class="empty">No speakers enrolled yet.</p>';
+    return;
+  }
+  list.innerHTML = names.map(name => `
+    <div class="speaker-row" id="row-${CSS.escape(name)}">
+      <span class="speaker-name" id="label-${CSS.escape(name)}">${name}</span>
+      <input type="text" id="input-${CSS.escape(name)}" value="${name}" style="display:none">
+      <button class="btn" onclick="startRename('${name}')">rename</button>
+      <button class="btn" id="save-${CSS.escape(name)}" style="display:none" onclick="saveRename('${name}')">save</button>
+      <button class="btn btn-danger" onclick="deleteSpeaker('${name}')">delete</button>
+    </div>
+  `).join('');
+}
+
+function startRename(name) {
+  document.getElementById(`label-${CSS.escape(name)}`).style.display = 'none';
+  document.getElementById(`input-${CSS.escape(name)}`).style.display = 'block';
+  document.getElementById(`save-${CSS.escape(name)}`).style.display = 'inline-block';
+}
+
+async function saveRename(oldName) {
+  const newName = document.getElementById(`input-${CSS.escape(oldName)}`).value.trim();
+  if (!newName) return;
+  const fd = new FormData();
+  fd.append('new_name', newName);
+  const res = await fetch(`/speakers/${encodeURIComponent(oldName)}`, { method: 'PATCH', body: fd });
+  if (res.ok) loadSpeakers();
+  else showStatus('Rename failed: ' + (await res.json()).error, false);
+}
+
+async function deleteSpeaker(name) {
+  if (!confirm(`Delete "${name}"?`)) return;
+  await fetch(`/speakers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  loadSpeakers();
+}
+
+async function enroll() {
+  const name = document.getElementById('enroll-name').value.trim();
+  const file = document.getElementById('enroll-file').files[0];
+  if (!name) return showStatus('Enter a name.', false);
+  if (!file)  return showStatus('Select an audio file.', false);
+
+  showStatus('Enrolling…', null);
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('file', file);
+  const res = await fetch('/speakers', { method: 'POST', body: fd });
+  const data = await res.json();
+  if (res.ok) {
+    showStatus(`Enrolled "${data.name}" successfully.`, true);
+    document.getElementById('enroll-name').value = '';
+    document.getElementById('enroll-file').value = '';
+    loadSpeakers();
+  } else {
+    showStatus('Error: ' + (data.error || 'unknown'), false);
+  }
+}
+
+function showStatus(msg, ok) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = ok === true ? 'ok' : ok === false ? 'err' : '';
+  if (ok !== null) el.style.display = 'block';
+}
+
+loadSpeakers();
+</script>
+</body>
+</html>
