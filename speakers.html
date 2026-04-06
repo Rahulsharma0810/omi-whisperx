@@ -24,7 +24,7 @@ header {
   border-bottom: 1px solid #21262d;
   flex-shrink: 0;
 }
-header h1 { font-size: 14px; font-weight: 600; color: #e6edf3; }
+header h1 { font-size: 14px; font-weight: 600; }
 nav { display: flex; gap: 8px; margin-left: auto; }
 nav a {
   color: #8b949e; font-size: 11px; text-decoration: none;
@@ -32,28 +32,58 @@ nav a {
 }
 nav a:hover { color: #e6edf3; border-color: #8b949e; }
 
-main { padding: 24px; max-width: 680px; }
+main { padding: 24px; max-width: 720px; display: flex; flex-direction: column; gap: 32px; }
 
-h2 { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+section h2 {
+  font-size: 11px; color: #8b949e; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 12px;
+}
 
-/* Enrolled speakers list */
-#speaker-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 32px; }
+.card {
+  background: #161b22; border: 1px solid #21262d;
+  border-radius: 6px; padding: 12px 14px;
+}
 
+/* Speaker list */
 .speaker-row {
   display: flex; align-items: center; gap: 8px;
-  background: #161b22; border: 1px solid #21262d;
-  border-radius: 6px; padding: 8px 12px;
+  padding: 6px 0; border-bottom: 1px solid #21262d;
 }
-.speaker-name { flex: 1; font-size: 13px; }
+.speaker-row:last-child { border-bottom: none; }
+.speaker-name { flex: 1; }
 .speaker-row input[type=text] {
   flex: 1; background: #0d1117; border: 1px solid #30363d;
   border-radius: 4px; padding: 4px 8px; color: #e6edf3;
   font-family: inherit; font-size: 13px;
 }
+
+/* Recordings */
+.rec-card {
+  background: #161b22; border: 1px solid #21262d;
+  border-radius: 6px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rec-meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.rec-label { font-weight: 600; color: #e6edf3; }
+.rec-time { color: #8b949e; font-size: 11px; }
+.rec-dur  { color: #8b949e; font-size: 11px; }
+audio { width: 100%; height: 32px; accent-color: #58a6ff; }
+.rec-assign {
+  display: flex; gap: 6px; align-items: center;
+}
+.rec-assign input[type=text] {
+  flex: 1; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 4px; padding: 4px 8px; color: #e6edf3;
+  font-family: inherit; font-size: 13px;
+}
+
+/* Buttons */
 .btn {
   padding: 4px 10px; border-radius: 4px; border: 1px solid #21262d;
   background: #21262d; color: #8b949e; cursor: pointer;
-  font-family: inherit; font-size: 12px;
+  font-family: inherit; font-size: 12px; white-space: nowrap;
 }
 .btn:hover { background: #30363d; color: #e6edf3; }
 .btn-danger { border-color: #6e2b2b; background: #2b1a1a; color: #f85149; }
@@ -61,13 +91,9 @@ h2 { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing:
 .btn-primary { border-color: #1f6feb; background: #1f3557; color: #58a6ff; }
 .btn-primary:hover { background: #1f6feb; color: #fff; }
 
-.empty { color: #8b949e; font-size: 12px; padding: 12px 0; }
+.empty { color: #8b949e; font-size: 12px; padding: 8px 0; }
 
 /* Enroll form */
-.enroll-box {
-  background: #161b22; border: 1px solid #21262d;
-  border-radius: 6px; padding: 16px;
-}
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 label { font-size: 11px; color: #8b949e; }
 input[type=text], input[type=file] {
@@ -76,10 +102,8 @@ input[type=text], input[type=file] {
 }
 input[type=file] { padding: 4px; cursor: pointer; }
 .hint { font-size: 11px; color: #8b949e; margin-top: 2px; }
-
 #status {
-  margin-top: 12px; padding: 6px 10px; border-radius: 4px;
-  font-size: 12px; display: none;
+  margin-top: 10px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;
 }
 #status.ok  { background: #1a2b1a; border: 1px solid #2ea043; color: #3fb950; display: block; }
 #status.err { background: #2b1a1a; border: 1px solid #6e2b2b; color: #f85149; display: block; }
@@ -97,60 +121,133 @@ input[type=file] { padding: 4px; cursor: pointer; }
 </header>
 
 <main>
-  <h2>Enrolled speakers</h2>
-  <div id="speaker-list"><p class="empty">Loading…</p></div>
 
-  <h2>Enroll new speaker</h2>
-  <div class="enroll-box">
-    <div class="field">
-      <label>Name</label>
-      <input type="text" id="enroll-name" placeholder="Rahul Sharma">
+  <!-- Unidentified recordings -->
+  <section>
+    <h2>Unidentified recordings — listen &amp; assign</h2>
+    <div id="rec-list"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- Enrolled speakers -->
+  <section>
+    <h2>Enrolled speakers</h2>
+    <div class="card" id="speaker-list"><p class="empty">Loading…</p></div>
+    <div style="margin-top:8px">
+      <button class="btn btn-danger" onclick="resetAll()">delete all speakers</button>
     </div>
-    <div class="field">
-      <label>Audio clip</label>
-      <input type="file" id="enroll-file" accept="audio/*">
-      <span class="hint">Any format — WAV, M4A, MP3. 5–30s of clear speech works best.</span>
+  </section>
+
+  <!-- Enroll from audio file -->
+  <section>
+    <h2>Enroll from audio file</h2>
+    <div class="card">
+      <div class="field">
+        <label>Name</label>
+        <input type="text" id="enroll-name" placeholder="Rahul Sharma">
+      </div>
+      <div class="field">
+        <label>Audio clip</label>
+        <input type="file" id="enroll-file" accept="audio/*">
+        <span class="hint">Any format — WAV, M4A, MP3. 5–30s of clear speech works best.</span>
+      </div>
+      <button class="btn btn-primary" onclick="enroll()">Enroll</button>
+      <div id="status"></div>
     </div>
-    <button class="btn btn-primary" onclick="enroll()">Enroll</button>
-    <div id="status"></div>
-  </div>
+  </section>
+
 </main>
 
 <script>
-async function loadSpeakers() {
-  const res = await fetch('/speakers');
-  const data = await res.json();
-  const list = document.getElementById('speaker-list');
-  const names = data.named_speakers || [];
-  if (!names.length) {
-    list.innerHTML = '<p class="empty">No speakers enrolled yet.</p>';
+// ── Recordings ──────────────────────────────────────────────────────────────
+
+async function loadRecordings() {
+  const res = await fetch('/speakers/recordings');
+  const { recordings } = await res.json();
+  const el = document.getElementById('rec-list');
+  if (!recordings.length) {
+    el.innerHTML = '<p class="empty">No unidentified recordings yet. Recordings appear here when Omi hears someone new.</p>';
     return;
   }
-  list.innerHTML = names.map(name => `
+  el.innerHTML = recordings.map(r => {
+    const ts = new Date(r.timestamp).toLocaleString();
+    return `
+    <div class="rec-card" id="rec-${r.id}">
+      <div class="rec-meta">
+        <span class="rec-label">${r.speaker_label}</span>
+        <span class="rec-time">${ts}</span>
+        <span class="rec-dur">${r.duration}s</span>
+      </div>
+      <audio controls src="/speakers/recordings/${r.id}/audio" preload="none"></audio>
+      <div class="rec-assign">
+        <input type="text" id="name-${r.id}" placeholder="Enter name…">
+        <button class="btn btn-primary" onclick="assignRec('${r.id}')">assign</button>
+        <button class="btn btn-danger"  onclick="deleteRec('${r.id}')">discard</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function assignRec(id) {
+  const name = document.getElementById(`name-${id}`).value.trim();
+  if (!name) return;
+  const fd = new FormData();
+  fd.append('name', name);
+  const res = await fetch(`/speakers/recordings/${id}/assign`, { method: 'POST', body: fd });
+  const data = await res.json();
+  if (res.ok) {
+    document.getElementById(`rec-${id}`)?.remove();
+    loadSpeakers();
+    if (!document.querySelector('.rec-card'))
+      document.getElementById('rec-list').innerHTML =
+        '<p class="empty">No unidentified recordings.</p>';
+  } else {
+    alert('Error: ' + (data.error || 'unknown'));
+  }
+}
+
+async function deleteRec(id) {
+  await fetch(`/speakers/recordings/${id}`, { method: 'DELETE' });
+  document.getElementById(`rec-${id}`)?.remove();
+  if (!document.querySelector('.rec-card'))
+    document.getElementById('rec-list').innerHTML =
+      '<p class="empty">No unidentified recordings.</p>';
+}
+
+// ── Enrolled speakers ────────────────────────────────────────────────────────
+
+async function loadSpeakers() {
+  const res = await fetch('/speakers');
+  const { named_speakers } = await res.json();
+  const el = document.getElementById('speaker-list');
+  if (!named_speakers.length) {
+    el.innerHTML = '<p class="empty">No speakers enrolled yet.</p>';
+    return;
+  }
+  el.innerHTML = named_speakers.map(name => `
     <div class="speaker-row" id="row-${CSS.escape(name)}">
-      <span class="speaker-name" id="label-${CSS.escape(name)}">${name}</span>
-      <input type="text" id="input-${CSS.escape(name)}" value="${name}" style="display:none">
+      <span class="speaker-name" id="lbl-${CSS.escape(name)}">${name}</span>
+      <input type="text" id="inp-${CSS.escape(name)}" value="${name}" style="display:none">
       <button class="btn" onclick="startRename('${name}')">rename</button>
-      <button class="btn" id="save-${CSS.escape(name)}" style="display:none" onclick="saveRename('${name}')">save</button>
+      <button class="btn btn-primary" id="sav-${CSS.escape(name)}" style="display:none" onclick="saveRename('${name}')">save</button>
       <button class="btn btn-danger" onclick="deleteSpeaker('${name}')">delete</button>
     </div>
   `).join('');
 }
 
 function startRename(name) {
-  document.getElementById(`label-${CSS.escape(name)}`).style.display = 'none';
-  document.getElementById(`input-${CSS.escape(name)}`).style.display = 'block';
-  document.getElementById(`save-${CSS.escape(name)}`).style.display = 'inline-block';
+  document.getElementById(`lbl-${CSS.escape(name)}`).style.display = 'none';
+  document.getElementById(`inp-${CSS.escape(name)}`).style.display = 'block';
+  document.getElementById(`sav-${CSS.escape(name)}`).style.display = 'inline-block';
 }
 
 async function saveRename(oldName) {
-  const newName = document.getElementById(`input-${CSS.escape(oldName)}`).value.trim();
+  const newName = document.getElementById(`inp-${CSS.escape(oldName)}`).value.trim();
   if (!newName) return;
   const fd = new FormData();
   fd.append('new_name', newName);
   const res = await fetch(`/speakers/${encodeURIComponent(oldName)}`, { method: 'PATCH', body: fd });
   if (res.ok) loadSpeakers();
-  else showStatus('Rename failed: ' + (await res.json()).error, false);
+  else alert('Rename failed: ' + (await res.json()).error);
 }
 
 async function deleteSpeaker(name) {
@@ -159,12 +256,19 @@ async function deleteSpeaker(name) {
   loadSpeakers();
 }
 
+async function resetAll() {
+  if (!confirm('Delete ALL speaker profiles?')) return;
+  await fetch('/speakers', { method: 'DELETE' });
+  loadSpeakers();
+}
+
+// ── Enroll from file ─────────────────────────────────────────────────────────
+
 async function enroll() {
   const name = document.getElementById('enroll-name').value.trim();
   const file = document.getElementById('enroll-file').files[0];
   if (!name) return showStatus('Enter a name.', false);
   if (!file)  return showStatus('Select an audio file.', false);
-
   showStatus('Enrolling…', null);
   const fd = new FormData();
   fd.append('name', name);
@@ -172,7 +276,7 @@ async function enroll() {
   const res = await fetch('/speakers', { method: 'POST', body: fd });
   const data = await res.json();
   if (res.ok) {
-    showStatus(`Enrolled "${data.name}" successfully.`, true);
+    showStatus(`Enrolled "${data.name}".`, true);
     document.getElementById('enroll-name').value = '';
     document.getElementById('enroll-file').value = '';
     loadSpeakers();
@@ -185,9 +289,9 @@ function showStatus(msg, ok) {
   const el = document.getElementById('status');
   el.textContent = msg;
   el.className = ok === true ? 'ok' : ok === false ? 'err' : '';
-  if (ok !== null) el.style.display = 'block';
 }
 
+loadRecordings();
 loadSpeakers();
 </script>
 </body>

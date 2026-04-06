@@ -105,6 +105,9 @@ BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 HF_TOKEN = os.environ.get("HF_TOKEN")
 SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.80"))
 PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", "~/.omi/speakers")).expanduser()
+RECORDINGS_DIR = Path(os.environ.get("RECORDINGS_DIR", "~/.omi/recordings")).expanduser()
+MAX_RECORDINGS = int(os.environ.get("MAX_RECORDINGS", "50"))
+RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Initial prompt for bilingual (Hindi+English / Hinglish) transcription.
 # Override via WHISPER_INITIAL_PROMPT env var. The default primes Whisper
@@ -459,6 +462,59 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
     }
 
 
+def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_id: str, embedding: np.ndarray) -> None:
+    """Save an audio clip + metadata for an unrecognized speaker so the user can label it later."""
+    try:
+        raw = whisperx.load_audio(audio_path)  # float32 mono 16kHz
+        sr = 16000
+        # Collect up to 20s of this speaker's audio
+        chunks = []
+        total = 0.0
+        for _, row in diarize_segments.iterrows():
+            if row.get("speaker") != label:
+                continue
+            start = int(row["start"] * sr)
+            end = int(row["end"] * sr)
+            seg = raw[start:end]
+            if len(seg) < sr * 0.5:  # skip < 0.5s
+                continue
+            chunks.append(seg)
+            total += len(seg) / sr
+            if total >= 20.0:
+                break
+        if not chunks:
+            return
+        audio_clip = np.concatenate(chunks)
+
+        rec_id = uuid4().hex[:12]
+        wav_path = RECORDINGS_DIR / f"{rec_id}.wav"
+        meta_path = RECORDINGS_DIR / f"{rec_id}.json"
+        emb_path = RECORDINGS_DIR / f"{rec_id}.npy"
+
+        sf.write(str(wav_path), audio_clip, sr)
+        np.save(str(emb_path), embedding)
+        meta = {
+            "id": rec_id,
+            "speaker_label": label,
+            "chunk_id": chunk_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "duration": round(total, 1),
+        }
+        meta_path.write_text(json.dumps(meta))
+
+        # Evict oldest recordings if over limit
+        all_meta = sorted(RECORDINGS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        while len(all_meta) > MAX_RECORDINGS:
+            old = all_meta.pop(0)
+            rec_id_old = old.stem
+            for ext in (".json", ".wav", ".npy"):
+                (RECORDINGS_DIR / f"{rec_id_old}{ext}").unlink(missing_ok=True)
+
+        logger.info(f"[REC] Saved {total:.1f}s clip for unknown speaker '{label}' → {rec_id}")
+    except Exception as e:
+        logger.warning(f"[REC] Failed to save recording for '{label}': {e}")
+
+
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
@@ -560,6 +616,11 @@ async def inference(
 
         # Extract per-speaker embeddings for name resolution
         speaker_embeddings = get_speaker_embeddings(audio_path, diarize_segments)
+
+        # Save clips for unrecognized speakers so user can label them later
+        for label, emb in speaker_embeddings.items():
+            if resolve_name(label, speaker_embeddings) == label:  # still anonymous
+                save_speaker_recording(audio_path, label, diarize_segments, chunk_id, emb)
 
         # Check for "remember this voice as NAME" trigger
         triggered_name = check_capture_trigger(segments)
@@ -977,10 +1038,55 @@ async def list_speakers():
     }
 
 
-@app.get("/speakers/ui", response_class=HTMLResponse)
+@app.get("/ui/speakers", response_class=HTMLResponse)
 async def speakers_ui():
     p = Path(__file__).parent / "speakers.html"
     return HTMLResponse(p.read_text())
+
+
+@app.get("/speakers/recordings")
+async def list_recordings():
+    recs = []
+    for meta_path in sorted(RECORDINGS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            recs.append(json.loads(meta_path.read_text()))
+        except Exception:
+            pass
+    return {"recordings": recs}
+
+
+@app.get("/speakers/recordings/{rec_id}/audio")
+async def get_recording_audio(rec_id: str):
+    from fastapi.responses import FileResponse
+    wav = RECORDINGS_DIR / f"{rec_id}.wav"
+    if not wav.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(str(wav), media_type="audio/wav")
+
+
+@app.post("/speakers/recordings/{rec_id}/assign")
+async def assign_recording(rec_id: str, name: str = Form(...)):
+    """Assign a name to a saved recording — enrolls the speaker and deletes the clip."""
+    name = name.strip().title()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    emb_path = RECORDINGS_DIR / f"{rec_id}.npy"
+    if not emb_path.exists():
+        return JSONResponse({"error": "recording not found"}, status_code=404)
+    emb = np.load(str(emb_path))
+    named_speakers[name] = emb
+    save_profile(name, emb)
+    for ext in (".json", ".wav", ".npy"):
+        (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
+    logger.info(f"[REC] Assigned recording {rec_id} → '{name}'")
+    return JSONResponse({"status": "enrolled", "name": name})
+
+
+@app.delete("/speakers/recordings/{rec_id}")
+async def delete_recording(rec_id: str):
+    for ext in (".json", ".wav", ".npy"):
+        (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.post("/speakers")
