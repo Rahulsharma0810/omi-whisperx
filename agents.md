@@ -166,13 +166,13 @@ Events emitted per chunk:
 
 ## Omi App Configuration
 
-**Public URL:** `https://baata.rvsharma.com` (Cloudflare tunnel → `localhost:8080`)
-Use this URL in the Omi app — not the local IP — so the pendant works away from home Wi-Fi.
+**Public URL:** Your Cloudflare tunnel URL (→ `localhost:8080`)
+Use a public URL in the Omi app — not the local IP — so the pendant works away from home Wi-Fi.
 
 **Transcript Provider config:**
 ```json
 {
-  "url": "https://baata.rvsharma.com/inference",
+  "url": "https://your-tunnel.example.com/inference",
   "request_type": "multipart_form",
   "headers": null,
   "params": {
