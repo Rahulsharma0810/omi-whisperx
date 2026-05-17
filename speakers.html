@@ -18,6 +18,7 @@ body {
 header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 10px 16px;
   background: #161b22;
@@ -25,14 +26,25 @@ header {
   flex-shrink: 0;
 }
 header h1 { font-size: 14px; font-weight: 600; }
-nav { display: flex; gap: 8px; margin-left: auto; }
+nav { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 nav a {
   color: #8b949e; font-size: 11px; text-decoration: none;
   padding: 2px 8px; border-radius: 4px; border: 1px solid #21262d;
 }
 nav a:hover { color: #e6edf3; border-color: #8b949e; }
+nav a.active { color: #58a6ff; border-color: #1f6feb; }
+nav .nav-dot { color: #484f58; margin: 0 2px; }
+nav .nav-label { color: #484f58; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; align-self: center; margin-left: 8px; }
 
-main { padding: 24px; max-width: 720px; display: flex; flex-direction: column; gap: 32px; }
+main {
+  padding: 24px;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
 
 section h2 {
   font-size: 11px; color: #8b949e; text-transform: uppercase;
@@ -108,6 +120,71 @@ input[type=file] { padding: 4px; cursor: pointer; }
 #status.ok  { background: #1a2b1a; border: 1px solid #2ea043; color: #3fb950; display: block; }
 #status.err { background: #2b1a1a; border: 1px solid #6e2b2b; color: #f85149; display: block; }
 #mic-btn.recording { background: #3d1a1a; border-color: #f85149; color: #f85149; }
+
+@media (max-width: 720px) {
+  header { align-items: flex-start; padding: 10px 12px; gap: 10px; }
+  nav {
+    margin-left: 0;
+    width: 100%;
+    gap: 8px;
+  }
+  nav .nav-label,
+  nav .nav-dot {
+    display: none;
+  }
+  nav a {
+    flex: 1 1 calc(50% - 8px);
+    text-align: center;
+    padding: 6px 8px;
+  }
+  main {
+    padding: 16px 12px 24px;
+    gap: 24px;
+  }
+  .card,
+  .rec-card {
+    padding: 12px;
+  }
+  .speaker-row,
+  .rec-assign {
+    flex-wrap: wrap;
+  }
+  .speaker-row .btn,
+  .rec-assign .btn {
+    flex: 1 1 calc(50% - 6px);
+  }
+  .speaker-row input[type=text],
+  .rec-assign input[type=text] {
+    width: 100%;
+    flex-basis: 100%;
+  }
+  #blocked-count {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+}
+
+@media (max-width: 520px) {
+  nav a {
+    flex-basis: 100%;
+  }
+  .speaker-row .btn,
+  .rec-assign .btn,
+  #enroll-btn,
+  #cancel-omi-btn,
+  #mic-btn {
+    width: 100%;
+    flex-basis: 100%;
+  }
+  #panel-record > div,
+  #panel-omi > div:first-child,
+  #panel-omi > div:nth-child(2) > div:last-child {
+    flex-wrap: wrap;
+  }
+  #omi-progress-secs {
+    width: 100%;
+  }
+}
 </style>
 </head>
 <body>
@@ -115,9 +192,14 @@ input[type=file] { padding: 4px; cursor: pointer; }
 <header>
   <h1>omi-whisperx speakers</h1>
   <nav>
-    <a href="/ui">monitor</a>
-    <a href="/benchmark">benchmark</a>
-    <a href="/health">health</a>
+    <a href="/ui/speakers" class="active">Speakers</a>
+    <span class="nav-dot">·</span>
+    <span class="nav-label">Local Whisper</span>
+    <a href="/ui">Log Stream</a>
+    <a href="/benchmark">Benchmark</a>
+    <span class="nav-dot">·</span>
+    <span class="nav-label">Custom STT</span>
+    <a href="/ui/live">Log Stream</a>
   </nav>
 </header>
 
@@ -127,14 +209,14 @@ input[type=file] { padding: 4px; cursor: pointer; }
   <section>
     <h2>Unidentified recordings — listen &amp; assign</h2>
     <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button class="btn" onclick="purge()">clean up matched voices</button>
-      <button class="btn btn-primary" onclick="confirmAll()">confirm all suggestions</button>
+      <button class="btn" onclick="purge()">Clean Up Matched Voices</button>
+      <button class="btn btn-primary" onclick="confirmAll()">Confirm All Suggestions</button>
       <span id="blocked-count" style="color:#8b949e;font-size:11px;margin-left:auto;"></span>
-      <button class="btn btn-danger" onclick="clearBlocked()" title="Remove all blocked voices so they can be recorded again">clear blocked</button>
+      <button class="btn btn-danger" onclick="clearBlocked()" title="Remove all blocked voices so they can be recorded again">Clear Blocked</button>
     </div>
     <p style="color:#8b949e;font-size:11px;margin-bottom:10px;">
-      <b>block</b> — never record this voice again (TV actors, background noise).
-      <b>discard</b> — delete this clip only.
+      <b>Block</b> — never record this voice again (TV actors, background noise).
+      <b>Discard</b> — delete this clip only.
       Auto-expires after 7 days.
     </p>
     <div id="rec-list"><p class="empty">Loading…</p></div>
@@ -145,7 +227,7 @@ input[type=file] { padding: 4px; cursor: pointer; }
     <h2>Enrolled speakers</h2>
     <div class="card" id="speaker-list"><p class="empty">Loading…</p></div>
     <div style="margin-top:8px">
-      <button class="btn btn-danger" onclick="resetAll()">delete all speakers</button>
+      <button class="btn btn-danger" onclick="resetAll()">Delete All Speakers</button>
     </div>
   </section>
 
@@ -161,7 +243,8 @@ input[type=file] { padding: 4px; cursor: pointer; }
       <!-- Source tabs -->
       <div style="display:flex;gap:6px;margin-bottom:10px;">
         <button class="btn btn-primary" id="tab-upload" onclick="setEnrollTab('upload')">Upload file</button>
-        <button class="btn"             id="tab-record" onclick="setEnrollTab('record')">Record mic</button>
+        <button class="btn"             id="tab-record" onclick="setEnrollTab('record')">Browser mic</button>
+        <button class="btn"             id="tab-omi"    onclick="setEnrollTab('omi')">&#127908; Record via Omi</button>
       </div>
 
       <!-- Upload -->
@@ -172,18 +255,61 @@ input[type=file] { padding: 4px; cursor: pointer; }
         </div>
       </div>
 
-      <!-- Record -->
+      <!-- Browser mic -->
       <div id="panel-record" style="display:none">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
           <button class="btn" id="mic-btn" onclick="toggleMic()">&#9679; Record</button>
           <span id="mic-timer" style="color:#8b949e;font-size:12px;min-width:40px;"></span>
-          <span id="mic-ready" style="color:#3fb950;font-size:12px;display:none;">ready</span>
+          <span id="mic-ready" style="color:#3fb950;font-size:12px;display:none;">Ready</span>
         </div>
         <audio id="mic-preview" controls style="width:100%;height:32px;display:none;" preload="none"></audio>
         <span class="hint">Requires HTTPS or localhost. 5–30s recommended.</span>
       </div>
 
-      <button class="btn btn-primary" onclick="enroll()" style="margin-top:10px;">Enroll</button>
+      <!-- Record via Omi -->
+      <div id="panel-omi" style="display:none">
+        <div style="margin-bottom:8px;display:flex;align-items:center;gap:10px;">
+          <label style="margin:0;">Duration</label>
+          <select id="omi-duration" style="background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:4px 8px;color:#e6edf3;font-family:inherit;font-size:13px;">
+            <option value="15">15 s</option>
+            <option value="30" selected>30 s</option>
+            <option value="60">60 s</option>
+          </select>
+        </div>
+        <div style="margin-bottom:8px;">
+          <div style="background:#161b22;border:1px solid #21262d;border-radius:4px;height:8px;overflow:hidden;">
+            <div id="omi-progress-bar" style="height:100%;width:0%;background:#1f6feb;transition:width .5s;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;">
+            <span id="omi-progress-text" style="color:#8b949e;font-size:11px;">Omi will record when you press Enroll.</span>
+            <span id="omi-progress-secs" style="color:#8b949e;font-size:11px;"></span>
+          </div>
+        </div>
+        <span class="hint">Speak naturally near the Omi pendant. Omi must be connected and streaming.</span>
+
+        <!-- Reading script -->
+        <div style="margin-top:12px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.6px;">Reading script — ~2 min for ★★★</span>
+            <button class="btn" style="font-size:11px;padding:2px 8px;" onclick="
+              const el = document.getElementById('omi-script');
+              el.style.display = el.style.display === 'none' ? '' : 'none';
+              this.textContent = el.style.display === 'none' ? 'Show' : 'Hide';
+            ">Hide</button>
+          </div>
+          <div id="omi-script" style="background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:12px;font-size:12px;line-height:1.8;color:#c9d1d9;">
+            <p style="margin-bottom:8px;">My name is <em style="color:#58a6ff;">[your name]</em> and I want to tell you a little about myself. I was born and raised in India, and I have spent most of my life curious about technology and how things work around us.</p>
+            <p style="margin-bottom:8px;">I remember the first time I used a computer — it felt like magic. Now I build software every single day, and sometimes it still feels like magic. The difference is I understand the trick behind it.</p>
+            <p style="margin-bottom:8px;">When I am not working, I enjoy cooking. There is something satisfying about following a recipe and ending up with something completely different because you trusted your instincts halfway through. I think good engineering works the same way — you start with a plan and you adapt.</p>
+            <p style="margin-bottom:8px;">I also read a lot. Fiction, non-fiction, technical papers, sometimes just long articles online at two in the morning when I should be sleeping. My favourite topics are artificial intelligence, human behaviour, and economics. They all connect in ways that are not obvious at first.</p>
+            <p style="margin-bottom:8px;">If you ask the people who know me well, they will tell you I talk too much and think too deeply about simple questions. I think that is fair. I once spent forty minutes thinking about why traffic jams exist even when nobody wants them to. The answer involves emergent behaviour and it is genuinely fascinating.</p>
+            <p>Anyway — that is me. A curious person, a builder, a reader, and apparently someone who enrolls their voice into an AI system on a Tuesday.</p>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="enroll()" style="margin-top:10px;" id="enroll-btn">Enroll</button>
+      <button class="btn btn-danger" onclick="cancelOmiEnroll()" style="margin-top:10px;display:none;" id="cancel-omi-btn">Cancel</button>
       <div id="status"></div>
     </div>
   </section>
@@ -207,8 +333,8 @@ async function loadRecordings() {
     const pct = match ? Math.round(match.score * 100) : 0;
     const colour = pct >= 72 ? '#3fb950' : pct >= 55 ? '#d29922' : '#8b949e';
     const suggestion = match
-      ? `<span style="color:${colour};font-size:11px;">closest: <b>${match.name}</b> ${pct}%</span>
-         <button class="btn btn-primary" onclick="confirmRec('${r.id}','${match.name}')" style="font-size:11px;padding:2px 8px;">confirm</button>`
+      ? `<span style="color:${colour};font-size:11px;">Closest: <b>${match.name}</b> ${pct}%</span>
+         <button class="btn btn-primary" onclick="confirmRec('${r.id}','${match.name}')" style="font-size:11px;padding:2px 8px;">Confirm</button>`
       : '';
     return `
     <div class="rec-card" id="rec-${r.id}" data-match="${match ? match.name : ''}" data-score="${pct}">
@@ -221,9 +347,9 @@ async function loadRecordings() {
       <audio controls src="/speakers/recordings/${r.id}/audio" preload="none"></audio>
       <div class="rec-assign">
         <input type="text" id="name-${r.id}" placeholder="Enter name…">
-        <button class="btn btn-primary" onclick="assignRec('${r.id}')">assign</button>
-        <button class="btn btn-danger"  onclick="blockRec('${r.id}')" title="Block — never record this voice again">block</button>
-        <button class="btn"             onclick="deleteRec('${r.id}')">discard</button>
+        <button class="btn btn-primary" onclick="assignRec('${r.id}')">Assign</button>
+        <button class="btn btn-danger"  onclick="blockRec('${r.id}')" title="Block — never record this voice again">Block</button>
+        <button class="btn"             onclick="deleteRec('${r.id}')">Discard</button>
       </div>
     </div>`;
   }).join('');
@@ -307,9 +433,20 @@ async function loadBlockedCount() {
 
 // ── Enrolled speakers ────────────────────────────────────────────────────────
 
+function qualityBadge(q) {
+  if (!q) return '';
+  const colours = { excellent: '#3fb950', good: '#58a6ff', fair: '#d29922', poor: '#f85149', only: '#8b949e' };
+  const labels  = { excellent: '★★★', good: '★★☆', fair: '★☆☆', poor: '☆☆☆', only: '—' };
+  const c = colours[q.rating] || '#8b949e';
+  const tip = q.closest
+    ? `Gap vs ${q.closest}: ${Math.round(q.gap * 100)}pt — higher = easier to tell apart`
+    : 'Only speaker enrolled — add more to get a rating';
+  return `<span title="${tip}" style="font-size:12px;color:${c};cursor:default;white-space:nowrap;">${labels[q.rating]}</span>`;
+}
+
 async function loadSpeakers() {
   const res = await fetch('/speakers');
-  const { named_speakers } = await res.json();
+  const { named_speakers, quality } = await res.json();
   const el = document.getElementById('speaker-list');
   if (!named_speakers.length) {
     el.innerHTML = '<p class="empty">No speakers enrolled yet.</p>';
@@ -319,9 +456,10 @@ async function loadSpeakers() {
     <div class="speaker-row" id="row-${CSS.escape(name)}">
       <span class="speaker-name" id="lbl-${CSS.escape(name)}">${name}</span>
       <input type="text" id="inp-${CSS.escape(name)}" value="${name}" style="display:none">
-      <button class="btn" onclick="startRename('${name}')">rename</button>
-      <button class="btn btn-primary" id="sav-${CSS.escape(name)}" style="display:none" onclick="saveRename('${name}')">save</button>
-      <button class="btn btn-danger" onclick="deleteSpeaker('${name}')">delete</button>
+      ${qualityBadge(quality?.[name])}
+      <button class="btn" onclick="startRename('${name}')">Rename</button>
+      <button class="btn btn-primary" id="sav-${CSS.escape(name)}" style="display:none" onclick="saveRename('${name}')">Save</button>
+      <button class="btn btn-danger" onclick="deleteSpeaker('${name}')">Delete</button>
     </div>
   `).join('');
 }
@@ -361,8 +499,10 @@ function setEnrollTab(tab) {
   enrollTab = tab;
   document.getElementById('panel-upload').style.display = tab === 'upload' ? '' : 'none';
   document.getElementById('panel-record').style.display = tab === 'record' ? '' : 'none';
+  document.getElementById('panel-omi').style.display    = tab === 'omi'    ? '' : 'none';
   document.getElementById('tab-upload').className = tab === 'upload' ? 'btn btn-primary' : 'btn';
   document.getElementById('tab-record').className = tab === 'record' ? 'btn btn-primary' : 'btn';
+  document.getElementById('tab-omi').className    = tab === 'omi'    ? 'btn btn-primary' : 'btn';
 }
 
 // ── Mic recording ─────────────────────────────────────────────────────────────
@@ -410,11 +550,67 @@ async function toggleMic() {
   }
 }
 
+// ── Enroll via Omi ────────────────────────────────────────────────────────────
+
+async function cancelOmiEnroll() {
+  await fetch('/speakers/enroll-omi', { method: 'DELETE' });
+  setOmiProgress(0, '');
+  document.getElementById('enroll-btn').style.display = '';
+  document.getElementById('cancel-omi-btn').style.display = 'none';
+  showStatus('Cancelled.', false);
+}
+
+function setOmiProgress(pct, text, secs, total) {
+  document.getElementById('omi-progress-bar').style.width = pct + '%';
+  document.getElementById('omi-progress-text').textContent = text;
+  document.getElementById('omi-progress-secs').textContent =
+    (secs !== undefined && total) ? `${secs}s / ${total}s` : '';
+}
+
+// SSE listener for Omi enrollment events
+const _es = new EventSource('/events');
+_es.onmessage = e => {
+  let ev;
+  try { ev = JSON.parse(e.data); } catch { return; }
+  if (ev.type === 'omi_enroll_progress') {
+    setOmiProgress(ev.pct, `Recording "${ev.name}"…`, ev.secs, ev.total);
+  } else if (ev.type === 'omi_enroll_complete') {
+    setOmiProgress(100, `Done!`);
+    showStatus(`Enrolled "${ev.name}" via Omi.`, true);
+    document.getElementById('enroll-btn').style.display = '';
+    document.getElementById('cancel-omi-btn').style.display = 'none';
+    loadSpeakers();
+  } else if (ev.type === 'omi_enroll_error') {
+    setOmiProgress(0, '');
+    showStatus('Omi enrollment failed: ' + ev.error, false);
+    document.getElementById('enroll-btn').style.display = '';
+    document.getElementById('cancel-omi-btn').style.display = 'none';
+  } else if (ev.type === 'omi_enroll_cancelled') {
+    setOmiProgress(0, 'Omi will record when you press Enroll.');
+  }
+};
+
 // ── Enroll submit ─────────────────────────────────────────────────────────────
 
 async function enroll() {
   const name = document.getElementById('enroll-name').value.trim();
   if (!name) return showStatus('Enter a name.', false);
+
+  if (enrollTab === 'omi') {
+    const duration = parseInt(document.getElementById('omi-duration').value);
+    showStatus('Waiting for Omi audio…', null);
+    setOmiProgress(0, 'Connecting…');
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('duration', duration);
+    const res = await fetch('/speakers/enroll-omi', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) return showStatus('Error: ' + (data.error || 'unknown'), false);
+    document.getElementById('enroll-btn').style.display = 'none';
+    document.getElementById('cancel-omi-btn').style.display = '';
+    setOmiProgress(0, `Recording "${name}"… speak near Omi.`, 0, duration);
+    return;
+  }
 
   let audioBlob;
   if (enrollTab === 'upload') {

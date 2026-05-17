@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Transcript</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; }
+
+  header { background: #1a1d27; border-bottom: 1px solid #2d3148; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .3px; }
+  .links { margin-left: auto; display: flex; gap: 12px; }
+  .links a { color: #8b95b0; text-decoration: none; font-size: .85rem; }
+  .links a:hover { color: #e2e8f0; }
+
+  #status-bar { display: flex; align-items: center; gap: 10px; padding: 10px 24px; background: #141720; border-bottom: 1px solid #22263a; font-size: .82rem; color: #8b95b0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a5068; flex-shrink: 0; transition: background .3s; }
+  .dot.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e80; }
+  .dot.streaming { background: #3b82f6; box-shadow: 0 0 6px #3b82f680; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+
+  #transcript { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 4px; }
+  .empty { color: #4a5068; text-align: center; margin-top: 60px; font-size: .95rem; }
+
+  .session { margin-top: 20px; }
+  .session:first-child { margin-top: 0; }
+  .session-header { font-size: .72rem; color: #4a5068; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #1e2235; }
+
+  .segment { display: flex; gap: 12px; padding: 6px 0; align-items: flex-start; }
+  .speaker-tag { min-width: 110px; max-width: 110px; font-size: .78rem; font-weight: 600; padding: 3px 8px; border-radius: 4px; text-align: center; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg-body { flex: 1; }
+  .seg-text { font-size: .95rem; line-height: 1.5; }
+  .seg-time { font-size: .72rem; color: #4a5068; margin-top: 2px; }
+
+  /* speaker colours — cycles through these */
+  .spk-0 { background: #1e3a5f; color: #60a5fa; }
+  .spk-1 { background: #1e4a3a; color: #4ade80; }
+  .spk-2 { background: #4a1e3a; color: #f472b6; }
+  .spk-3 { background: #3a3a1e; color: #facc15; }
+  .spk-4 { background: #3a1e1e; color: #f87171; }
+  .spk-5 { background: #2a1e4a; color: #c084fc; }
+
+  #clear-btn { margin-left: auto; background: none; border: 1px solid #2d3148; color: #8b95b0; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: .8rem; }
+  #clear-btn:hover { border-color: #4a5068; color: #e2e8f0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Live Transcript</h1>
+  <nav style="margin-left:auto;display:flex;align-items:center;gap:12px;font-size:11px;">
+    <a href="/ui/speakers" style="color:#8b95b0;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #2d3148;">Speakers</a>
+    <span style="color:#4a5068;margin:0 4px;">·</span>
+    <span style="color:#4a5068;text-transform:uppercase;letter-spacing:.6px;">Local Whisper</span>
+    <a href="/ui" style="color:#8b95b0;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #2d3148;">Log Stream</a>
+    <a href="/benchmark" style="color:#8b95b0;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #2d3148;">Benchmark</a>
+    <span style="color:#4a5068;margin:0 4px;">·</span>
+    <span style="color:#4a5068;text-transform:uppercase;letter-spacing:.6px;">Custom STT</span>
+    <a href="/ui/live" style="color:#60a5fa;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #1e3a5f;">Log Stream</a>
+  </nav>
+</header>
+
+<div id="status-bar">
+  <div class="dot" id="dot"></div>
+  <span id="status-text">Waiting for connection…</span>
+  <button id="clear-btn" onclick="clearTranscript()">Clear</button>
+</div>
+
+<div id="transcript">
+  <div class="empty" id="empty">No transcript yet — start speaking into Omi.</div>
+</div>
+
+<script>
+const speakerIndex = {};
+let speakerCount = 0;
+let sessionEl = null;
+let sessionCount = 0;
+
+function speakerClass(name) {
+  if (!(name in speakerIndex)) speakerIndex[name] = speakerCount++ % 6;
+  return `spk-${speakerIndex[name]}`;
+}
+
+function fmt(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2,'0')}`;
+}
+
+function clearTranscript() {
+  document.getElementById('transcript').innerHTML = '<div class="empty" id="empty">No transcript yet — start speaking into Omi.</div>';
+  sessionEl = null; sessionCount = 0;
+  Object.keys(speakerIndex).forEach(k => delete speakerIndex[k]);
+  speakerCount = 0;
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + state;
+  document.getElementById('status-text').textContent = text;
+}
+
+function newSession(label) {
+  sessionCount++;
+  const div = document.createElement('div');
+  div.className = 'session';
+  div.innerHTML = `<div class="session-header">${label}</div>`;
+  document.getElementById('transcript').appendChild(div);
+  return div;
+}
+
+function appendSegments(segments) {
+  const box = document.getElementById('transcript');
+  const empty = document.getElementById('empty');
+  if (empty) empty.remove();
+
+  if (!sessionEl) sessionEl = newSession(`Session ${sessionCount + 1}`);
+
+  segments.forEach(seg => {
+    if (!seg.text.trim()) return;
+    const cls = speakerClass(seg.speaker);
+    const div = document.createElement('div');
+    div.className = 'segment';
+    div.innerHTML = `
+      <div class="speaker-tag ${cls}">${seg.speaker}</div>
+      <div class="seg-body">
+        <div class="seg-text">${seg.text}</div>
+        <div class="seg-time">${fmt(seg.start)} – ${fmt(seg.end)}</div>
+      </div>`;
+    sessionEl.appendChild(div);
+  });
+
+  box.scrollTop = box.scrollHeight;
+}
+
+// SSE
+const es = new EventSource('/events');
+
+es.onopen = () => setStatus('connected', 'Connected — waiting for Omi…');
+es.onerror = () => setStatus('', 'SSE disconnected — retrying…');
+
+es.onmessage = e => {
+  let ev;
+  try { ev = JSON.parse(e.data); } catch { return; }
+
+  if (ev.type === 'ws_connected') {
+    sessionEl = null;
+    setStatus('streaming', `Omi connected — streaming${ev.lang ? ' [' + ev.lang + ']' : ''}…`);
+  } else if (ev.type === 'ws_audio') {
+    setStatus('streaming', 'Receiving audio…');
+  } else if (ev.type === 'ws_transcript') {
+    const lag = ev.lag;
+    let lagStr = '';
+    if (lag) {
+      // audio_recv_at / sent_at are seconds since session start
+      const fmt = s => `+${s.toFixed(2)}s`;
+      lagStr = ` | audio@${fmt(lag.audio_recv_at)} → sent@${fmt(lag.sent_at)} | lag=${lag.total_lag_s}s (queue=${lag.queue_wait_s}s proc=${lag.proc_time_s}s)`;
+    }
+    setStatus('connected', `Transcript: ${new Date().toLocaleTimeString()} — ${ev.segments.length} seg(s)${lagStr}`);
+    appendSegments(ev.segments);
+  } else if (ev.type === 'ws_disconnected') {
+    setStatus('connected', `Session ended (${ev.frames} frames buffered) — waiting for Omi…`);
+  } else if (ev.type === 'transcript') {
+    // /inference HTTP transcripts
+    if (ev.segments && ev.segments.length) appendSegments(ev.segments);
+  }
+};
+</script>
+</body>
+</html>

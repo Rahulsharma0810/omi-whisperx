@@ -1,5 +1,6 @@
 import re
 import json
+import struct
 import tempfile
 import os
 import asyncio
@@ -8,14 +9,20 @@ import time
 import socket
 from urllib.parse import urlparse
 from uuid import uuid4
+import warnings
 import numpy as np
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
+warnings.filterwarnings("ignore", message=".*torchcodec.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*libtorchcodec.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*libavutil.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*resource_tracker.*", category=UserWarning)
 import torch
 import httpx
 from pathlib import Path
 import platform
 import resource
 import soundfile as sf
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from typing import Optional
 import whisperx
@@ -27,6 +34,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+# Suppress noisy third-party loggers
+logging.getLogger("lightning.pytorch.utilities.upgrade_checkpoint").setLevel(logging.ERROR)
+logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # ntfy.sh alerts
@@ -67,10 +77,15 @@ async def notify(title: str, message: str, priority: str = "default", tags: str 
 # SSE — live dashboard event bus
 # ---------------------------------------------------------------------------
 _sse_clients: set[asyncio.Queue] = set()
+_recent_events: list[str] = []  # last 50 events replayed to new SSE clients
+_MAX_RECENT = 50
 
 def emit_event(event_type: str, data: dict) -> None:
-    """Push an event to every connected dashboard client."""
+    """Push an event to every connected dashboard client and cache for replays."""
     payload = json.dumps({"type": event_type, **data})
+    _recent_events.append(payload)
+    if len(_recent_events) > _MAX_RECENT:
+        _recent_events.pop(0)
     dead = set()
     for q in _sse_clients:
         try:
@@ -102,8 +117,21 @@ APP_VERSION = _detect_version()
 
 MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
 BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
+# FAST_SPEAKER=true  → resemblyzer embed of whole utterance (~0.1s) instead of pyannote (~15s)
+#   Identifies enrolled speakers, saves clips for unknown voices, labels all segs with same speaker
+#   Best for pendant use (1 speaker per utterance). Multi-speaker utterances get single label.
+# FAST_SPEAKER=false → full pyannote diarization (accurate multi-speaker, but ~15s per utterance)
+FAST_SPEAKER = os.environ.get("FAST_SPEAKER", "true").lower() == "true"
+SKIP_DIARIZE = os.environ.get("SKIP_DIARIZE", "false").lower() == "true"  # legacy: no speaker id at all
+# Skip word-level alignment in live WebSocket path — saves ~2s, Omi only needs segment-level timestamps
+SKIP_LIVE_ALIGN = os.environ.get("SKIP_LIVE_ALIGN", "true").lower() == "true"
+# Trust client-side VAD (Omi VAD Gate) — skip server VAD, flush on any 0.5s frame gap
+# Enable when iOS "VAD Gate" is ON — Omi already strips silence before sending
+TRUST_CLIENT_VAD = os.environ.get("TRUST_CLIENT_VAD", "true").lower() == "true"
+# Drop utterances that waited longer than this in the semaphore queue — prevents unbounded backlog
+MAX_QUEUE_AGE = float(os.environ.get("MAX_QUEUE_AGE", "30"))
 HF_TOKEN = os.environ.get("HF_TOKEN")
-SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.80"))
+SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.75"))
 PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", "~/.omi/speakers")).expanduser()
 RECORDINGS_DIR = Path(os.environ.get("RECORDINGS_DIR", "~/.omi/recordings")).expanduser()
 BLOCKED_DIR = Path(os.environ.get("BLOCKED_DIR", "~/.omi/blocked")).expanduser()
@@ -111,6 +139,14 @@ MAX_RECORDINGS = int(os.environ.get("MAX_RECORDINGS", "50"))
 RECORDINGS_MAX_AGE_DAYS = int(os.environ.get("RECORDINGS_MAX_AGE_DAYS", "7"))
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 BLOCKED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Omi API — direct conversation creation, bypasses 2-min conversation_timeout
+# POST segments immediately after speech ends instead of waiting for Omi backend timeout
+OMI_API_KEY = os.environ.get("OMI_API_KEY", "")
+OMI_API_BASE = os.environ.get("OMI_API_BASE", "https://api.omi.me/v1/dev/user")
+OMI_USER_NAME = os.environ.get("OMI_USER_NAME", "")  # speaker name to mark as is_user=True
+# Seconds of silence after last utterance before POSTing conversation to Omi API
+OMI_CONV_DEBOUNCE = float(os.environ.get("OMI_CONV_DEBOUNCE", "30"))
 
 # Initial prompt for bilingual (Hindi+English / Hinglish) transcription.
 # Override via WHISPER_INITIAL_PROMPT env var. The default primes Whisper
@@ -361,9 +397,14 @@ logger.info(
     f"whisper={WHISPER_DEVICE}/{COMPUTE_TYPE} torch={TORCH_DEVICE}"
 )
 model = whisperx.load_model(MODEL_SIZE, WHISPER_DEVICE, compute_type=COMPUTE_TYPE)
+# Lower VAD thresholds for pendant mic (default 0.5/0.363 rejects quiet/distant speech)
+model._vad_params.update({"vad_onset": 0.3, "vad_offset": 0.2})
 
 logger.info("Loading diarization pipeline ...")
 diarize_model = DiarizationPipeline(token=HF_TOKEN, device=TORCH_DEVICE)
+
+# Cache align models per language — loading from disk per utterance was ~5-10s of the lag
+_align_model_cache: dict = {}  # lang -> (align_model, metadata)
 
 logger.info("Loading speaker encoder ...")
 # resemblyzer does not support MPS; keep on CPU
@@ -425,6 +466,7 @@ def save_profile(name: str, embedding: np.ndarray) -> None:
 
 named_speakers: dict[str, np.ndarray] = load_profiles()
 capture_pending: Optional[str] = None
+_omi_enroll: Optional[dict] = None  # {"name", "frames", "target", "done"}
 recent_text_buffer: list[str] = []
 
 logger.info("Models ready.")
@@ -436,12 +478,32 @@ app = FastAPI()
 # Helpers
 # ---------------------------------------------------------------------------
 def is_hallucination(seg: dict) -> bool:
+    import re
     text = seg.get("text", "").strip()
     if not text:
         return True
+
+    # Segment shorter than 100 ms — too brief to be reliable
+    if seg.get("end", 0.0) - seg.get("start", 0.0) < 0.1:
+        return True
+
+    # Whisper's own signal: high probability that no speech occurred
+    if seg.get("no_speech_prob", 0.0) >= 0.45:
+        return True
+
+    # Low transcription confidence — Whisper was guessing
+    if seg.get("avg_logprob", 0.0) < -0.8:
+        return True
+
+    # Only punctuation / symbols — no actual letters
+    if not re.search(r"[a-zA-Z0-9\u0900-\u097F]", text):
+        return True
+
+    # Repetitive loop (e.g. "the the the the the the the")
     words = text.split()
     if len(words) > 6 and len(set(words)) / len(words) < 0.3:
         return True
+
     return False
 
 
@@ -542,6 +604,9 @@ def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_
                 break
         if not chunks:
             return
+        if total < 5.0:  # skip clips too short for a reliable embedding
+            logger.debug(f"[REC] Skipping {label}: only {total:.1f}s of audio (need ≥5s)")
+            return
         audio_clip = np.concatenate(chunks)
 
         rec_id = uuid4().hex[:12]
@@ -581,19 +646,79 @@ def resolve_name(label: str, speaker_embeddings: dict[str, np.ndarray]) -> str:
     """Map SPEAKER_XX to a known name if similarity exceeds threshold."""
     emb = speaker_embeddings.get(label)
     if emb is None:
+        logger.info(f"[SPEAKER] {label}: no embedding extracted")
         return label
 
-    best_name, best_score = None, 0.0
-    for name, profile in named_speakers.items():
-        score = similarity(profile, emb)
-        if score > best_score:
-            best_score = score
-            best_name = name
-
-    if best_name and best_score >= SPEAKER_THRESHOLD:
-        return best_name
+    scores = {name: similarity(profile, emb) for name, profile in named_speakers.items()}
+    if scores:
+        best_name = max(scores, key=scores.__getitem__)
+        best_score = scores[best_name]
+        logger.info(f"[SPEAKER] {label}: best={best_name} {best_score:.2f} "
+                    + " ".join(f"{n}={s:.2f}" for n, s in scores.items()))
+        if best_score >= SPEAKER_THRESHOLD:
+            return best_name
 
     return label
+
+
+def _fast_identify_speaker(audio_path: str) -> str:
+    """Identify speaker by embedding whole utterance — no pyannote, ~0.1s.
+    Saves clip for unknown voices. Returns resolved name or 'UNKNOWN'."""
+    try:
+        audio, sr = sf.read(audio_path)
+    except Exception:
+        return "UNKNOWN"
+
+    if len(audio) < sr * 0.5:  # too short to embed reliably
+        return "UNKNOWN"
+
+    try:
+        wav = preprocess_wav(audio.astype(np.float32), source_sr=sr)
+        emb = voice_encoder.embed_utterance(wav)
+    except Exception as e:
+        logger.debug(f"[SPEAKER] embed failed: {e}")
+        return "UNKNOWN"
+
+    # Check blocked voices
+    dedup_threshold = max(0.72, SPEAKER_THRESHOLD - 0.08)
+    if _is_blocked(emb, dedup_threshold):
+        logger.debug("[SPEAKER] utterance matches blocked voice — skipping")
+        return "BLOCKED"
+
+    # Match against enrolled speakers
+    scores = {name: similarity(profile, emb) for name, profile in named_speakers.items()}
+    if scores:
+        best_name = max(scores, key=scores.__getitem__)
+        best_score = scores[best_name]
+        logger.info(f"[SPEAKER] fast-id: best={best_name} {best_score:.2f} "
+                    + " ".join(f"{n}={s:.2f}" for n, s in scores.items()))
+        if best_score >= SPEAKER_THRESHOLD:
+            return best_name
+
+    # Unknown voice — save recording for later enrollment
+    duration = len(audio) / sr
+    if duration >= 5.0:
+        try:
+            _expire_old_recordings()
+            # Dedup against existing unknown recordings
+            same_voice_count = sum(
+                1 for p in RECORDINGS_DIR.glob("*.npy")
+                if similarity(np.load(str(p)), emb) >= dedup_threshold
+            )
+            if same_voice_count < 5:
+                rec_id = uuid4().hex[:12]
+                sf.write(str(RECORDINGS_DIR / f"{rec_id}.wav"), audio, sr)
+                np.save(str(RECORDINGS_DIR / f"{rec_id}.npy"), emb)
+                (RECORDINGS_DIR / f"{rec_id}.json").write_text(json.dumps({
+                    "id": rec_id, "speaker_label": "UNKNOWN",
+                    "chunk_id": rec_id, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "duration": round(duration, 1),
+                }))
+                logger.info(f"[REC] Saved {duration:.1f}s fast-id clip → {rec_id}")
+        except Exception as e:
+            logger.warning(f"[REC] fast-id save failed: {e}")
+
+    return "UNKNOWN"
 
 
 def check_capture_trigger(segments: list[dict]) -> Optional[str]:
@@ -609,6 +734,561 @@ def check_capture_trigger(segments: list[dict]) -> Optional[str]:
         recent_text_buffer.clear()
         return name
     return None
+
+
+# ---------------------------------------------------------------------------
+# WebSocket /live — Custom STT provider with diarization for Omi app
+# ---------------------------------------------------------------------------
+
+def _ogg_crc(data: bytes) -> int:
+    """Ogg CRC-32 (polynomial 0x04c11db7, no reflection, no final XOR)."""
+    crc = 0
+    for byte in data:
+        crc ^= byte << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04c11db7) if (crc & 0x80000000) else (crc << 1)
+        crc &= 0xFFFFFFFF
+    return crc
+
+
+def _make_ogg_page(payload: bytes, granule: int, serial: int, seq: int, flags: int) -> bytes:
+    """Build one Ogg page with correct CRC."""
+    # Lacing: split payload into ≤255-byte segments
+    segs = [payload[i:i + 255] for i in range(0, max(len(payload), 1), 255)]
+    lacing = bytes(len(s) for s in segs)
+    body = b"".join(segs)
+    # Header with CRC zeroed
+    hdr = (b"OggS" + struct.pack("<B", 0) + struct.pack("<B", flags)
+           + struct.pack("<q", granule) + struct.pack("<I", serial)
+           + struct.pack("<I", seq) + b"\x00\x00\x00\x00"
+           + struct.pack("<B", len(segs)) + lacing)
+    page = hdr + body
+    crc = _ogg_crc(page)
+    return page[:22] + struct.pack("<I", crc) + page[26:]
+
+
+def _opus_frames_to_ogg(frames: list[bytes], sample_rate: int) -> bytes:
+    """Wrap raw Opus frames in a valid Ogg-Opus container."""
+    import struct as _struct
+    serial = 0xA1B2C3D4
+
+    # ID header
+    id_hdr = (b"OpusHead" + _struct.pack("<B", 1) + _struct.pack("<B", 1)
+              + _struct.pack("<H", 312) + _struct.pack("<I", sample_rate)
+              + _struct.pack("<h", 0) + _struct.pack("<B", 0))
+    # Comment header
+    vendor = b"whisperx"
+    com_hdr = (b"OpusTags" + _struct.pack("<I", len(vendor)) + vendor
+               + _struct.pack("<I", 0))
+
+    pages = [
+        _make_ogg_page(id_hdr,  0, serial, 0, 0x02),  # BOS
+        _make_ogg_page(com_hdr, 0, serial, 1, 0x00),
+    ]
+    # Opus always reports granule positions in 48 kHz samples; 20 ms = 960 samples
+    granule = 0
+    for i, frame in enumerate(frames):
+        granule += 960  # 20 ms frame at 48 kHz
+        eos = 0x04 if i == len(frames) - 1 else 0x00
+        pages.append(_make_ogg_page(frame, granule, serial, i + 2, eos))
+
+    return b"".join(pages)
+
+
+def _decode_ws_audio(frames: list[bytes], codec: str, sample_rate: int) -> str:
+    """Decode WebSocket audio frames to a WAV temp file. Returns the path."""
+    import wave
+
+    raw_bytes = b"".join(frames)
+
+    # Already Ogg-containerised (magic OggS) — save as-is
+    if raw_bytes[:4] == b"OggS":
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(raw_bytes)
+            return f.name
+
+    # Detect raw PCM16.
+    # Omi always sends PCM16 at 16 kHz regardless of what the codec field says.
+    # We use a majority-vote heuristic: sample 8 int16 values across the buffer;
+    # if most are < 32000 (not clipped) it's almost certainly PCM, not Opus.
+    step = max(2, len(raw_bytes) // 16) & ~1  # even step to stay on sample boundary
+    samples = [
+        abs(int.from_bytes(raw_bytes[i:i+2], "little", signed=True))
+        for i in range(0, min(len(raw_bytes), step * 8), step)
+    ]
+    is_pcm = (codec.lower() in ("pcm", "pcm16", "pcm_s16le", "linear16")
+              or sum(s < 32000 for s in samples) > len(samples) // 2)
+
+    if is_pcm:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            path = f.name
+        with wave.open(path, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(raw_bytes)
+        return path
+
+    # Raw Opus frames — wrap in Ogg-Opus container
+    ogg_data = _opus_frames_to_ogg(frames, sample_rate)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+        f.write(ogg_data)
+        return f.name
+
+
+async def _process_live_audio(
+    frames: list[bytes], codec: str, sample_rate: int, language: Optional[str]
+) -> list[dict]:
+    """Decode frames → transcribe → (align) → (diarize) → return speaker-labelled segments."""
+    t0 = time.time()
+    audio_path = await asyncio.to_thread(_decode_ws_audio, frames, codec, sample_rate)
+
+    try:
+        result = await asyncio.to_thread(
+            model.transcribe, audio_path,
+            language=language, task="transcribe", batch_size=BATCH_SIZE,
+        )
+        t_transcribe = time.time()
+        detected_lang = result.get("language", language or "hi")
+
+        if SKIP_LIVE_ALIGN:
+            t_align = time.time()  # skip — word timestamps not needed for Omi live path
+        else:
+            try:
+                if detected_lang not in _align_model_cache:
+                    logger.info(f"[WS] Loading align model '{detected_lang}' (first time, caching)...")
+                    _align_model_cache[detected_lang] = await asyncio.to_thread(
+                        whisperx.load_align_model, detected_lang, TORCH_DEVICE
+                    )
+                align_model, metadata = _align_model_cache[detected_lang]
+                result = await asyncio.to_thread(
+                    whisperx.align, result["segments"], align_model, metadata, audio_path, TORCH_DEVICE
+                )
+            except Exception as e:
+                logger.warning(f"[WS] Alignment skipped: {e}")
+            t_align = time.time()
+
+        segments = result.get("segments", [])
+        if FAST_SPEAKER:
+            # Embed whole utterance with resemblyzer (~0.1s) — match against enrolled speakers
+            speaker_name = await asyncio.to_thread(_fast_identify_speaker, audio_path)
+            t_diarize = time.time()
+            formatted = []
+            for seg in segments:
+                if is_hallucination(seg):
+                    continue
+                formatted.append({
+                    "text": seg.get("text", "").strip(),
+                    "speaker": speaker_name,
+                    "start": round(seg.get("start", 0.0), 2),
+                    "end": round(seg.get("end", 0.0), 2),
+                })
+        elif SKIP_DIARIZE:
+            t_diarize = time.time()
+            formatted = []
+            for seg in segments:
+                if is_hallucination(seg):
+                    continue
+                formatted.append({
+                    "text": seg.get("text", "").strip(),
+                    "speaker": "SPEAKER_00",
+                    "start": round(seg.get("start", 0.0), 2),
+                    "end": round(seg.get("end", 0.0), 2),
+                })
+        else:
+            # Full pyannote diarization — accurate multi-speaker, ~15s
+            diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
+            result = assign_word_speakers(diarize_segs, result)
+            segments = result.get("segments", [])
+            speaker_embeddings = await asyncio.to_thread(get_speaker_embeddings, audio_path, diarize_segs)
+            t_diarize = time.time()
+            formatted = []
+            for seg in segments:
+                if is_hallucination(seg):
+                    continue
+                label = seg.get("speaker", "UNKNOWN")
+                formatted.append({
+                    "text": seg.get("text", "").strip(),
+                    "speaker": resolve_name(label, speaker_embeddings),
+                    "start": round(seg.get("start", 0.0), 2),
+                    "end": round(seg.get("end", 0.0), 2),
+                })
+
+        logger.info(
+            f"[WS] {len(formatted)} segs | "
+            f"transcribe={t_transcribe-t0:.2f}s align={t_align-t_transcribe:.2f}s "
+            f"diarize={t_diarize-t_align:.2f}s total={t_diarize-t0:.2f}s"
+        )
+        return formatted
+
+    finally:
+        os.unlink(audio_path)
+
+
+# VAD-triggered utterance constants
+_VAD_SILENCE_TRIGGER = 25   # 500 ms of silence (25 × 20 ms frames) ends an utterance
+_VAD_MIN_SPEECH_FRAMES = 15  # 300 ms minimum utterance before we bother processing
+_VAD_MAX_UTT_FRAMES = 1500   # 30s hard cap — covers virtually all natural sentences
+
+
+_RMS_SILENCE_THRESHOLD = 50   # int16 RMS below this = true silence (was 300, too high for pendant)
+
+
+def _compute_rms(frames: list[bytes]) -> float:
+    """Return RMS energy of 640-byte PCM16 frames."""
+    raw = b"".join(f for f in frames if len(f) == 640)
+    if not raw:
+        return 0.0
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    return float(np.sqrt(np.mean(samples ** 2)))
+
+
+def _has_speech_webrtcvad(frames: list[bytes], sample_rate: int) -> bool:
+    """Return True only if frames have enough energy AND webrtcvad detects speech."""
+    import webrtcvad
+
+    # RMS energy gate — skip true silence
+    rms = _compute_rms(frames)
+    if rms < _RMS_SILENCE_THRESHOLD:
+        logger.debug(f"[VAD] Skipping: rms={rms:.1f} < {_RMS_SILENCE_THRESHOLD}")
+        return False
+
+    vad = webrtcvad.Vad(1)  # aggressiveness 1 = least strict
+    speech_frames = 0
+    valid_frames = 0
+    for frame in frames:
+        if len(frame) == 640:  # 20ms at 16kHz
+            valid_frames += 1
+            try:
+                if vad.is_speech(frame, sample_rate):
+                    speech_frames += 1
+            except Exception:
+                pass
+    if valid_frames == 0:
+        return False
+    # Require 40% of frames to be speech
+    return speech_frames >= max(1, valid_frames * 4 // 10)
+
+
+async def _post_segments_to_omi(segments: list[dict], language: str, started_at: float, finished_at: float) -> None:
+    """POST accumulated transcript segments to Omi API to create a conversation immediately.
+    Bypasses Omi's 2-min conversation_timeout — conversation appears in app within seconds.
+    """
+    if not OMI_API_KEY or not segments:
+        return
+    import datetime, json as _json, urllib.request
+
+    payload = {
+        "transcript_segments": [
+            {
+                "text": s["text"],
+                "speaker": s.get("speaker", "SPEAKER_00"),
+                "is_user": s.get("speaker") == OMI_USER_NAME if OMI_USER_NAME else True,
+                "start": s.get("start", 0.0),
+                "end": s.get("end", 0.0),
+            }
+            for s in segments
+            if s.get("text", "").strip()
+        ],
+        "source": "phone",
+        "language": language or "en",
+        "started_at": datetime.datetime.utcfromtimestamp(started_at).isoformat() + "Z",
+        "finished_at": datetime.datetime.utcfromtimestamp(finished_at).isoformat() + "Z",
+    }
+    if not payload["transcript_segments"]:
+        return
+
+    def _do_post() -> None:
+        data = _json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{OMI_API_BASE}/conversations/from-segments",
+            data=data,
+            headers={"Authorization": f"Bearer {OMI_API_KEY}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = _json.loads(resp.read())
+                conv_id = body.get("id", "?")
+                logger.info(f"[OMI] Conversation created: {conv_id} ({len(payload['transcript_segments'])} segs)")
+        except urllib.error.HTTPError as e:
+            logger.warning(f"[OMI] API error {e.code}: {e.read().decode()[:200]}")
+        except Exception as e:
+            logger.warning(f"[OMI] Failed to post conversation: {e}")
+
+    await asyncio.to_thread(_do_post)
+
+
+@app.websocket("/live")
+async def live_transcription(
+    websocket: WebSocket,
+    uid: Optional[str] = None,
+    language: Optional[str] = None,
+    sample_rate: int = 16000,
+    codec: str = "opus",
+):
+    await websocket.accept()
+    logger.info(f"[WS] Connected uid={uid} lang={language} sr={sample_rate} codec={codec}")
+    emit_event("ws_connected", {"uid": uid, "lang": language, "codec": codec})
+
+    import webrtcvad as _webrtcvad
+    vad = _webrtcvad.Vad(1)  # aggressiveness 1 = least strict (3 was filtering real speech)
+
+    all_segments: list = []
+    utterance_tasks: list = []
+    ws_lock = asyncio.Lock()
+    proc_sem = asyncio.Semaphore(1)  # one utterance through WhisperX at a time
+
+    # Omi API direct posting — accumulate segments, POST after OMI_CONV_DEBOUNCE silence
+    omi_pending_segs: list = []
+    omi_conv_started_at: float = 0.0
+    omi_debounce_task: Optional[asyncio.Task] = None
+
+    async def _omi_debounce_fire() -> None:
+        await asyncio.sleep(OMI_CONV_DEBOUNCE)
+        nonlocal omi_pending_segs, omi_conv_started_at
+        if omi_pending_segs:
+            segs = omi_pending_segs[:]
+            t_start = omi_conv_started_at
+            omi_pending_segs = []
+            omi_conv_started_at = 0.0
+            await _post_segments_to_omi(segs, language, t_start, time.time())
+
+    def _omi_reset_debounce(new_segs: list) -> None:
+        nonlocal omi_pending_segs, omi_conv_started_at, omi_debounce_task
+        if new_segs:
+            if not omi_pending_segs:
+                omi_conv_started_at = time.time()
+            omi_pending_segs.extend(new_segs)
+        if omi_debounce_task and not omi_debounce_task.done():
+            omi_debounce_task.cancel()
+        if omi_pending_segs:
+            omi_debounce_task = asyncio.create_task(_omi_debounce_fire())
+
+    # VAD state
+    speech_buffer: list[bytes] = []
+    silence_count = 0
+    speaking = False
+    utterance_start_frame = 0
+    utterance_wall_start: float = 0.0  # wall-clock when first speech frame of utterance received
+    frame_count = 0   # total frames received (for timestamp calculation)
+    session_start = time.time()
+
+    async def _flush_utterance(frames: list[bytes], offset: float, audio_recv_at: float) -> None:
+        """Process one VAD-detected utterance: transcribe, send to Omi, emit SSE."""
+        queued_at = time.time()
+        if not TRUST_CLIENT_VAD:
+            has_speech = await asyncio.to_thread(_has_speech_webrtcvad, frames, sample_rate)
+            if not has_speech:
+                logger.debug(f"[WS] Utterance @{offset:.1f}s skipped (silence)")
+                return
+        async with proc_sem:  # one at a time — prevents MPS OOM from parallel tasks
+            proc_start = time.time()
+            queue_wait = proc_start - queued_at
+            if queue_wait > MAX_QUEUE_AGE:
+                logger.warning(
+                    f"[WS] Utterance @{offset:.1f}s DROPPED — waited {queue_wait:.1f}s "
+                    f"(MAX_QUEUE_AGE={MAX_QUEUE_AGE}s)"
+                )
+                return
+            try:
+                segs = await _process_live_audio(frames, codec, sample_rate, language)
+                sent_at = time.time()
+                proc_time = sent_at - proc_start
+                total_lag = sent_at - audio_recv_at
+                for seg in segs:
+                    seg["start"] = round(seg["start"] + offset, 2)
+                    seg["end"] = round(seg["end"] + offset, 2)
+                if not segs:
+                    return
+                all_segments.extend(segs)
+                _omi_reset_debounce(segs)  # restart 30s timer; POST to Omi API when silence detected
+                emit_event("ws_transcript", {"uid": uid, "segments": segs,
+                    "lag": {"audio_recv_at": round(audio_recv_at - session_start, 2),
+                            "sent_at": round(sent_at - session_start, 2),
+                            "queue_wait_s": round(queue_wait, 2),
+                            "proc_time_s": round(proc_time, 2),
+                            "total_lag_s": round(total_lag, 2)}})
+                # Omi iOS requires: no type field, OR type="Results". Any other type = ignored.
+                payload = json.dumps({
+                    "segments": segs,
+                })
+                async with ws_lock:
+                    try:
+                        await websocket.send_text(payload)
+                    except Exception:
+                        pass
+                logger.info(
+                    f"[WS] Utterance @{offset:.1f}s → {len(segs)} seg(s) | "
+                    f"audio_recv={time.strftime('%H:%M:%S', time.localtime(audio_recv_at))}.{int(audio_recv_at % 1 * 1000):03d} "
+                    f"sent={time.strftime('%H:%M:%S', time.localtime(sent_at))}.{int(sent_at % 1 * 1000):03d} "
+                    f"queue_wait={queue_wait:.2f}s proc={proc_time:.2f}s total_lag={total_lag:.2f}s | "
+                    + " | ".join(f"[{s['speaker']}] {s['text']}" for s in segs)
+                )
+            except Exception as e:
+                err = str(e)
+                if "No active speech" not in err and "Unspecified internal error" not in err:
+                    logger.error(f"[WS] Utterance @{offset:.1f}s failed: {e}")
+            finally:
+                # Release MPS memory after each utterance
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+
+    def _schedule_utterance() -> None:
+        """Snapshot current speech_buffer, reset VAD state, fire async task."""
+        nonlocal speech_buffer, silence_count, speaking, utterance_start_frame, utterance_wall_start
+        frames = speech_buffer[:]
+        offset = utterance_start_frame * 0.02
+        recv_at = utterance_wall_start  # wall-clock of first speech frame
+        speech_buffer = []
+        silence_count = 0
+        speaking = False
+        utterance_wall_start = 0.0
+        task = asyncio.create_task(_flush_utterance(frames, offset, recv_at))
+        utterance_tasks.append(task)
+
+    # Timeout to flush utterance when Omi VAD is on (silence frames not sent)
+    _FRAME_GAP_TIMEOUT = 0.5  # seconds between frames before we treat gap as utterance end
+
+    try:
+        while True:
+            # TRUST_CLIENT_VAD: Omi VAD Gate already stripped silence — always use short gap timeout
+            if TRUST_CLIENT_VAD:
+                recv_timeout = _FRAME_GAP_TIMEOUT if speech_buffer else 90.0
+            else:
+                recv_timeout = _FRAME_GAP_TIMEOUT if speaking else 90.0
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=recv_timeout)
+            except asyncio.TimeoutError:
+                has_buffer = len(speech_buffer) >= _VAD_MIN_SPEECH_FRAMES
+                if (speaking or TRUST_CLIENT_VAD) and has_buffer:
+                    logger.debug("[WS] Frame gap — flushing utterance")
+                    _schedule_utterance()
+                elif not speaking and not (TRUST_CLIENT_VAD and speech_buffer):
+                    logger.warning("[WS] Timed out after 90s inactivity")
+                    break
+                continue
+
+            if message["type"] == "websocket.disconnect":
+                break
+
+            if message.get("bytes"):
+                frame = message["bytes"]
+                if frame_count == 0:
+                    logger.info(f"[WS] First audio frame: {len(frame)} bytes | hex: {frame[:8].hex()}")
+                    emit_event("ws_audio", {"uid": uid, "frame_bytes": len(frame)})
+
+                # Tap into Omi enrollment capture if active
+                global _omi_enroll
+                if _omi_enroll and not _omi_enroll.get("done"):
+                    _omi_enroll["frames"].append(frame)
+                    collected = len(_omi_enroll["frames"])
+                    target = _omi_enroll["target"]
+                    if collected % 50 == 0:  # progress every 1s
+                        emit_event("omi_enroll_progress", {
+                            "name": _omi_enroll["name"],
+                            "pct": round(collected / target * 100),
+                            "secs": collected // 50,
+                            "total": target // 50,
+                        })
+                    if collected >= target:
+                        _omi_enroll["done"] = True
+                        asyncio.create_task(_finish_omi_enrollment(_omi_enroll.copy()))
+                        _omi_enroll = None
+
+                if TRUST_CLIENT_VAD:
+                    # Client already stripped silence — every frame is speech
+                    if not speaking:
+                        speaking = True
+                        utterance_start_frame = frame_count
+                        utterance_wall_start = time.time()
+                    speech_buffer.append(frame)
+                    # Hard cap: flush at 30s regardless
+                    if len(speech_buffer) >= _VAD_MAX_UTT_FRAMES:
+                        _schedule_utterance()
+                else:
+                    is_speech = False
+                    if len(frame) == 640:
+                        try:
+                            is_speech = vad.is_speech(frame, sample_rate)
+                        except Exception:
+                            pass
+
+                    # Debug log every 50 frames (1s)
+                    if frame_count % 50 == 0:
+                        rms = 0
+                        if len(frame) == 640:
+                            samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
+                            rms = int(np.sqrt(np.mean(samples ** 2)))
+                        logger.debug(
+                            f"[WS] frame={frame_count} size={len(frame)} rms={rms} "
+                            f"is_speech={is_speech} speaking={speaking} buf={len(speech_buffer)}"
+                        )
+
+                    if is_speech:
+                        if not speaking:
+                            speaking = True
+                            utterance_start_frame = frame_count
+                            utterance_wall_start = time.time()
+                        silence_count = 0
+                        speech_buffer.append(frame)
+                    else:
+                        if speaking:
+                            silence_count += 1
+                            speech_buffer.append(frame)
+                            if (silence_count >= _VAD_SILENCE_TRIGGER
+                                    and len(speech_buffer) >= _VAD_MIN_SPEECH_FRAMES):
+                                _schedule_utterance()
+                            elif len(speech_buffer) >= _VAD_MAX_UTT_FRAMES:
+                                _schedule_utterance()
+                        else:
+                            speech_buffer.append(frame)
+                            if len(speech_buffer) >= 250:  # 5s force-flush
+                                rms = _compute_rms(speech_buffer)
+                                if rms < _RMS_SILENCE_THRESHOLD:
+                                    logger.debug(f"[WS] 5s buffer silent (rms={rms:.1f}) — discarding")
+                                speech_buffer = []
+                            else:
+                                logger.info(f"[WS] VAD never triggered — force-flushing {len(speech_buffer)} frames (rms={rms:.1f})")
+                                utterance_start_frame = frame_count - len(speech_buffer)
+                                utterance_wall_start = time.time() - len(speech_buffer) * 0.02
+                                _schedule_utterance()
+
+                frame_count += 1
+
+            elif message.get("text"):
+                try:
+                    data = json.loads(message["text"])
+                    if data.get("type") == "CloseStream":
+                        logger.info(f"[WS] CloseStream — {frame_count} frames total")
+                        break
+                except json.JSONDecodeError:
+                    pass
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"[WS] Error: {e}")
+
+    emit_event("ws_disconnected", {"uid": uid, "frames": frame_count})
+
+    # Flush any remaining speech
+    if speaking and len(speech_buffer) >= _VAD_MIN_SPEECH_FRAMES:
+        _schedule_utterance()
+
+    if utterance_tasks:
+        await asyncio.gather(*utterance_tasks, return_exceptions=True)
+
+    # Cancel debounce timer and POST any remaining segments immediately on disconnect
+    if omi_debounce_task and not omi_debounce_task.done():
+        omi_debounce_task.cancel()
+    if omi_pending_segs:
+        await _post_segments_to_omi(omi_pending_segs, language, omi_conv_started_at, time.time())
+
+    try:
+        await websocket.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -652,9 +1332,12 @@ async def inference(
 
         # Alignment: fall back to "hi" if detected language has no alignment model
         try:
-            align_model, metadata = whisperx.load_align_model(
-                language_code=detected_lang, device=TORCH_DEVICE
-            )
+            if detected_lang not in _align_model_cache:
+                logger.info(f"Loading align model for '{detected_lang}' (first time, caching)...")
+                _align_model_cache[detected_lang] = whisperx.load_align_model(
+                    language_code=detected_lang, device=TORCH_DEVICE
+                )
+            align_model, metadata = _align_model_cache[detected_lang]
             result = whisperx.align(
                 result["segments"], align_model, metadata, audio_path, TORCH_DEVICE
             )
@@ -855,12 +1538,13 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
             if not no_alignment:
                 t0 = time.perf_counter()
                 try:
-                    align_model, metadata = await asyncio.to_thread(
-                        whisperx.load_align_model, detected_lang, TORCH_DEVICE)
+                    if detected_lang not in _align_model_cache:
+                        _align_model_cache[detected_lang] = await asyncio.to_thread(
+                            whisperx.load_align_model, detected_lang, TORCH_DEVICE)
+                    align_model, metadata = _align_model_cache[detected_lang]
                     result = await asyncio.to_thread(
                         whisperx.align, result["segments"], align_model,
                         metadata, audio_path, TORCH_DEVICE)
-                    del align_model
                 except Exception as e:
                     logger.warning(f"[BENCH] Alignment skipped: {e}")
                 timings["alignment"] = time.perf_counter() - t0
@@ -1069,6 +1753,9 @@ async def dashboard():
 @app.get("/events")
 async def sse():
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    # Replay recent events so new clients catch up
+    for payload in list(_recent_events):
+        queue.put_nowait(payload)
     _sse_clients.add(queue)
 
     async def stream():
@@ -1090,10 +1777,31 @@ async def sse():
 
 @app.get("/speakers")
 async def list_speakers():
+    names = list(named_speakers.keys())
+    quality = {}
+    for name, emb in named_speakers.items():
+        others = {n: e for n, e in named_speakers.items() if n != name}
+        if others:
+            scores = {n: float(similarity(e, emb)) for n, e in others.items()}
+            closest_name = max(scores, key=scores.__getitem__)
+            closest_score = scores[closest_name]
+            gap = round(1.0 - closest_score, 3)
+            # Rating: excellent ≥0.30, good 0.18-0.30, fair 0.10-0.18, poor <0.10
+            rating = "excellent" if gap >= 0.30 else "good" if gap >= 0.18 else "fair" if gap >= 0.10 else "poor"
+        else:
+            gap, closest_name, closest_score, rating = None, None, None, "only"
+        quality[name] = {"gap": gap, "closest": closest_name, "closest_score": round(closest_score, 3) if closest_score else None, "rating": rating}
     return {
-        "named_speakers": list(named_speakers.keys()),
+        "named_speakers": names,
+        "quality": quality,
         "capture_pending": capture_pending,
     }
+
+
+@app.get("/ui/live", response_class=HTMLResponse)
+async def live_ui():
+    p = Path(__file__).parent / "live.html"
+    return HTMLResponse(p.read_text())
 
 
 @app.get("/ui/speakers", response_class=HTMLResponse)
@@ -1132,7 +1840,11 @@ async def list_recordings():
                 emb = np.load(str(emb_path))
                 scores = {n: round(similarity(p, emb), 3) for n, p in named_speakers.items()}
                 best_name = max(scores, key=scores.__getitem__)
-                meta["best_match"] = {"name": best_name, "score": scores[best_name], "all": scores}
+                best_score = scores[best_name]
+                if best_score >= SPEAKER_THRESHOLD:
+                    meta["best_match"] = {"name": best_name, "score": best_score, "all": scores}
+                else:
+                    meta["best_match"] = None
             else:
                 meta["best_match"] = None
             recs.append(meta)
@@ -1231,6 +1943,55 @@ async def delete_recording(rec_id: str):
     for ext in (".json", ".wav", ".npy"):
         (RECORDINGS_DIR / f"{rec_id}{ext}").unlink(missing_ok=True)
     return JSONResponse({"status": "deleted"})
+
+
+async def _finish_omi_enrollment(capture: dict) -> None:
+    """Extract resemblyzer embedding from Omi-captured frames and save profile."""
+    name = capture["name"]
+    frames = capture["frames"]
+    audio_path = await asyncio.to_thread(_decode_ws_audio, frames, "pcm", 16000)
+    try:
+        import soundfile as sf
+        audio, sr = sf.read(audio_path)
+        wav = preprocess_wav(audio.astype(np.float32), source_sr=sr)
+        emb = voice_encoder.embed_utterance(wav)
+        named_speakers[name] = emb
+        save_profile(name, emb)
+        purged = _purge_matched_recordings()
+        emit_event("omi_enroll_complete", {"name": name, "purged": purged})
+        logger.info(f"[ENROLL-OMI] Enrolled '{name}' from {len(frames)} Omi frames, purged {purged}")
+    except Exception as e:
+        emit_event("omi_enroll_error", {"name": name, "error": str(e)})
+        logger.error(f"[ENROLL-OMI] Failed for '{name}': {e}")
+    finally:
+        try:
+            os.unlink(audio_path)
+        except Exception:
+            pass
+
+
+@app.post("/speakers/enroll-omi")
+async def start_omi_enrollment(name: str = Form(...), duration: int = Form(30)):
+    """Begin capturing Omi audio for speaker enrollment."""
+    global _omi_enroll
+    name = name.strip().title()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    if _omi_enroll and not _omi_enroll.get("done"):
+        return JSONResponse({"error": "Enrollment already in progress"}, status_code=409)
+    target = duration * 50  # 20 ms frames → 50/s
+    _omi_enroll = {"name": name, "frames": [], "target": target, "done": False}
+    emit_event("omi_enroll_start", {"name": name, "duration": duration})
+    logger.info(f"[ENROLL-OMI] Started capture for '{name}' ({duration}s)")
+    return {"status": "capturing", "name": name, "duration": duration}
+
+
+@app.delete("/speakers/enroll-omi")
+async def cancel_omi_enrollment():
+    global _omi_enroll
+    _omi_enroll = None
+    emit_event("omi_enroll_cancelled", {})
+    return {"status": "cancelled"}
 
 
 @app.post("/speakers")

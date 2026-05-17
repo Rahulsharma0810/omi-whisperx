@@ -12,7 +12,7 @@ body {
   color: #e6edf3;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 13px;
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
 }
@@ -22,12 +22,33 @@ header {
   border-bottom: 1px solid #21262d;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
   flex-shrink: 0;
   background: #161b22;
 }
 
 h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
+
+nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+nav a {
+  color: #8b949e;
+  text-decoration: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #21262d;
+}
+nav a:hover { color: #e6edf3; border-color: #444c56; }
+nav a.active { color: #58a6ff; border-color: #1f6feb; }
+nav .nav-dot { color: #484f58; margin: 0 4px; }
+nav .nav-label { color: #484f58; text-transform: uppercase; letter-spacing: .6px; }
 
 #dot {
   width: 8px; height: 8px;
@@ -41,8 +62,8 @@ h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
 #stats {
   color: #8b949e;
   font-size: 11px;
-  margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
 }
 .stat { display: flex; gap: 4px; }
@@ -54,6 +75,7 @@ h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
 
 #feed {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;
   display: flex;
@@ -165,6 +187,79 @@ h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
 .result-saved   { color: #3fb950; font-weight: 600; letter-spacing: 0.3px; }
 .result-dropped { color: #f85149; font-weight: 600; letter-spacing: 0.3px; }
 .preview { color: #6e7681; font-size: 11px; margin-left: 6px; font-style: italic; }
+
+@media (max-width: 720px) {
+  body { font-size: 12px; }
+  header { align-items: flex-start; padding: 10px 12px; gap: 10px; }
+  nav {
+    order: 3;
+    margin-left: 0;
+    width: 100%;
+    gap: 8px;
+  }
+  nav .nav-dot,
+  nav .nav-label {
+    display: none;
+  }
+  nav a {
+    flex: 1 1 calc(50% - 8px);
+    text-align: center;
+    min-width: 0;
+    padding: 6px 8px;
+  }
+  #stats {
+    order: 2;
+    width: 100%;
+    gap: 12px;
+    justify-content: space-between;
+  }
+  #feed { padding: 10px; }
+  .chunk-header,
+  .row { padding-left: 10px; padding-right: 10px; }
+  .chunk-header {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+  .row {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .stage {
+    width: auto;
+    padding-top: 0;
+  }
+  .speaker,
+  .text {
+    display: inline;
+    overflow-wrap: anywhere;
+  }
+  .detail-input,
+  .detail-raw {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  .timing,
+  .preview,
+  .conf,
+  .escalated {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  nav a {
+    flex-basis: 100%;
+  }
+  #stats {
+    gap: 8px;
+  }
+  .stat {
+    width: calc(50% - 4px);
+    justify-content: space-between;
+  }
+}
 </style>
 </head>
 <body>
@@ -172,12 +267,20 @@ h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
 <header>
   <div id="dot"></div>
   <h1>omi-whisperx monitor</h1>
-  <a href="/ui/speakers" style="margin-left:auto;color:#8b949e;font-size:11px;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #21262d;">speakers</a>
-  <a href="/benchmark" style="color:#8b949e;font-size:11px;text-decoration:none;padding:2px 8px;border-radius:4px;border:1px solid #21262d;">benchmark</a>
+  <nav>
+    <a href="/ui/speakers">Speakers</a>
+    <span class="nav-dot">·</span>
+    <span class="nav-label">Local Whisper</span>
+    <a href="/ui" class="active">Log Stream</a>
+    <a href="/benchmark">Benchmark</a>
+    <span class="nav-dot">·</span>
+    <span class="nav-label">Custom STT</span>
+    <a href="/ui/live">Log Stream</a>
+  </nav>
   <div id="stats">
-    <div class="stat"><span class="stat-label">chunks</span><span class="stat-val total" id="s-total">0</span></div>
-    <div class="stat"><span class="stat-label">kept</span><span class="stat-val kept" id="s-kept">0</span></div>
-    <div class="stat"><span class="stat-label">dropped</span><span class="stat-val drop" id="s-drop">0</span></div>
+    <div class="stat"><span class="stat-label">Chunks</span><span class="stat-val total" id="s-total">0</span></div>
+    <div class="stat"><span class="stat-label">Kept</span><span class="stat-val kept" id="s-kept">0</span></div>
+    <div class="stat"><span class="stat-label">Dropped</span><span class="stat-val drop" id="s-drop">0</span></div>
   </div>
 </header>
 

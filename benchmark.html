@@ -22,17 +22,19 @@ header {
   border-bottom: 1px solid #21262d;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
   flex-shrink: 0;
   background: #161b22;
 }
 h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.5px; }
-nav { margin-left: auto; display: flex; gap: 10px; }
+nav { margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; }
 nav a {
   color: #8b949e; font-size: 11px; text-decoration: none;
   padding: 2px 8px; border-radius: 4px; border: 1px solid #21262d;
 }
 nav a:hover { color: #e6edf3; border-color: #444c56; }
+nav a.active { color: #58a6ff; border-color: #1f6feb; }
 
 /* ── Form ── */
 .form-section {
@@ -118,6 +120,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 #output {
   flex: 1; padding: 12px 16px;
   display: flex; flex-direction: column; gap: 14px;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -202,6 +205,135 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 .ollama-ent  { color: #f85149; }
 .detail-raw  { font-size: 11px; color: #6e7681; }
 .detail-raw::before { content: "↳ raw: "; color: #444c56; }
+
+@media (max-width: 720px) {
+  header { align-items: flex-start; padding: 10px 12px; gap: 10px; }
+  nav {
+    margin-left: 0;
+    width: 100%;
+    gap: 8px;
+  }
+  nav a {
+    flex: 1 1 calc(33.333% - 8px);
+    text-align: center;
+  }
+  .form-section {
+    padding: 12px;
+    gap: 12px;
+  }
+  .field {
+    width: 100%;
+  }
+  select,
+  input[type="number"] {
+    width: 100%;
+    max-width: none;
+  }
+  .source-group,
+  .upload-area,
+  .record-area {
+    width: 100%;
+  }
+  .source-btn {
+    flex: 1;
+  }
+  #run-btn {
+    width: 100%;
+  }
+  #status {
+    width: 100%;
+    align-self: flex-start;
+  }
+  #output {
+    padding: 10px 12px;
+  }
+  .sys-info {
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
+  .stage-row {
+    grid-template-columns: 1fr 72px 72px;
+    gap: 6px 10px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .stage-bar-wrap {
+    grid-column: 1 / -1;
+    padding-left: 0;
+  }
+  .summary-grid {
+    grid-template-columns: 1.2fr .9fr .9fr .8fr;
+  }
+  .summary-grid .hdr,
+  .summary-grid .cell,
+  .mem-info,
+  .trial-header,
+  .e2e-row {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .summary-grid .hdr:last-child,
+  .summary-grid .cell:nth-child(5n) {
+    display: none;
+  }
+  .e2e-row {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .e2e-label {
+    width: auto;
+    padding-top: 0;
+  }
+  .detail-input,
+  .detail-raw {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 520px) {
+  nav a {
+    flex-basis: 100%;
+  }
+  .source-group {
+    flex-direction: column;
+  }
+  .source-btn {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid #30363d;
+  }
+  .source-btn:last-child {
+    border-bottom: none;
+  }
+  .record-area {
+    flex-wrap: wrap;
+  }
+  .stage-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .stage-name {
+    grid-column: 1 / -1;
+  }
+  .stage-elapsed,
+  .stage-rtf {
+    text-align: left;
+  }
+  .summary-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .summary-grid .hdr:nth-child(3),
+  .summary-grid .hdr:nth-child(4),
+  .summary-grid .cell:nth-child(5n + 3),
+  .summary-grid .cell:nth-child(5n + 4) {
+    display: none;
+  }
+  .mem-info {
+    line-height: 1.6;
+  }
+}
 </style>
 </head>
 <body>
@@ -209,9 +341,9 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
 <header>
   <h1>omi-whisperx benchmark</h1>
   <nav>
-    <a href="/ui">monitor</a>
-    <a href="/ui/speakers">speakers</a>
-    <a href="/health">health</a>
+    <a href="/ui">Monitor</a>
+    <a href="/ui/speakers">Speakers</a>
+    <a href="/health">Health</a>
   </nav>
 </header>
 
@@ -252,7 +384,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
         <span id="rec-label">Record</span>
       </button>
       <span class="rec-timer" id="rec-timer">0:00</span>
-      <span class="rec-ready" id="rec-ready" style="display:none">✓ ready</span>
+      <span class="rec-ready" id="rec-ready" style="display:none">✓ Ready</span>
     </div>
   </div>
 
@@ -279,7 +411,7 @@ button#run-btn:disabled { background: #21262d; color: #6e7681; cursor: default; 
   </div>
 
   <button id="run-btn" onclick="runOrCancel()">Run</button>
-  <span id="status">idle</span>
+  <span id="status">Idle</span>
 </div>
 
 <div id="output"></div>
@@ -376,7 +508,7 @@ async function startRecording() {
       el.classList.add('active');
     }, 1000);
   } catch (err) {
-    setStatus('mic error: ' + err.message, 'err');
+    setStatus('Mic Error: ' + err.message, 'err');
   }
 }
 
@@ -399,13 +531,13 @@ function setRunning(running) {
   runBtn.textContent = running ? 'Cancel' : 'Run';
   runBtn.style.background = running ? '#6e2020' : '';
   runBtn.disabled = false;
-  if (running) setStatus('running…', 'running');
+  if (running) setStatus('Running…', 'running');
 }
 
 async function cancelBenchmark() {
   await fetch('/benchmark/cancel', { method: 'POST' });
   setRunning(false);
-  setStatus('cancelled', '');
+  setStatus('Cancelled', '');
   if (es) { es.close(); es = null; }
 }
 
@@ -495,7 +627,7 @@ function onTrialDone(ev) {
   const row = document.createElement('div');
   row.className = 'stage-row total-row';
   row.innerHTML =
-    `<div class="stage-name">total</div>` +
+    `<div class="stage-name">Total</div>` +
     `<div class="stage-elapsed">${ev.total.toFixed(2)}s</div>` +
     `<div class="stage-rtf ${rtfClass(rtf)}">RTF ${rtf.toFixed(3)}</div>` +
     `<div></div>`;
@@ -509,7 +641,7 @@ const _onBenchStartOrig = onBenchStart;
 
 function onBenchComplete(ev) {
   setRunning(false);
-  setStatus('done', 'done');
+  setStatus('Done', 'done');
   if (es) { es.close(); es = null; }
 
   const allStages = [...(ev.stages || [])];
@@ -548,7 +680,7 @@ function onBenchComplete(ev) {
 
 function onBenchError(ev) {
   setRunning(false);
-  setStatus(ev.message === 'cancelled' ? 'cancelled' : 'error: ' + ev.message,
+  setStatus(ev.message === 'cancelled' ? 'Cancelled' : 'Error: ' + ev.message,
             ev.message === 'cancelled' ? '' : 'err');
   if (es) { es.close(); es = null; }
 }
@@ -632,14 +764,14 @@ const HANDLERS = {
 // ── Run ──────────────────────────────────────────────────────────────────────
 async function runBenchmark() {
   if (audioSource === 'upload' && !uploadedFile) {
-    setStatus('choose a file first', 'err'); return;
+    setStatus('Choose a File First', 'err'); return;
   }
   if (audioSource === 'record' && !recordedBlob) {
-    setStatus('record audio first', 'err'); return;
+    setStatus('Record Audio First', 'err'); return;
   }
 
   setRunning(true);
-  setStatus('starting…', 'running');
+  setStatus('Starting…', 'running');
 
   const body = new FormData();
   body.append('trials',         document.getElementById('f-trials').value);

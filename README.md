@@ -1,122 +1,163 @@
 # omi-whisperx
 
-A self-hosted, real-time audio transcription server for the [Omi](https://www.omi.me/) wearable device. Powered by [WhisperX](https://github.com/m-bain/whisperX), it transcribes conversations with speaker labels, identifies enrolled voices by name, and filters out entertainment/non-informative audio before Omi creates a memory.
+> **Self-hosted, real-time speech-to-text for the [Omi](https://www.omi.me/) wearable** — powered by [WhisperX](https://github.com/m-bain/whisperX) with named speaker identification, direct Omi memory creation, and a live transcript dashboard.
 
-Runs on **Mac (Apple Silicon)**, **Raspberry Pi 5**, or any **Linux/CUDA** machine.
+No Omi subscription required. Runs on **Mac Apple Silicon**, **Raspberry Pi 5**, or any **Linux/CUDA** machine.
+
+[![Docker](https://img.shields.io/badge/ghcr.io-omi--whisperx-blue?logo=docker)](https://ghcr.io/rahulsharma0810/omi-whisperx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+---
+
+## Why
+
+Omi's cloud STT costs money and sends your audio to third-party servers. This project replaces it entirely — your audio never leaves your machine, speaker names are resolved locally, and conversations are pushed directly to your Omi memory via the official API, bypassing the 2-minute conversation processing delay.
 
 ---
 
 ## Features
 
-- **Real-time transcription** via WhisperX (CTranslate2-optimized Whisper)
-- **Speaker diarization** — who spoke, when
-- **Speaker identification** — matches voices to saved profiles ("Rahul" instead of SPEAKER_00)
-- **Voice enrollment** — say *"remember this voice as NAME"* to register a new speaker on the fly
-- **Two-tier content filter** — drops entertainment audio (movies, TV, gaming) before Omi saves a memory
-  - Tier 1: Fast local NLI classifier (zero-shot, runs on device)
-  - Tier 2: Ollama LLM fallback for ambiguous cases
-- **Live monitoring dashboard** at `/ui` — SSE stream shows the full pipeline in real time
-- **Built-in benchmark tool** — measures RTF and per-stage latency; compare hardware profiles
-- **Push notifications** via ntfy.sh for pipeline alerts
-- **Multi-platform Docker image** — arm64 (Raspberry Pi) + amd64 (Linux/CUDA)
+| | Feature |
+|---|---|
+| 🎙️ | **Real-time WebSocket STT** — streams from Omi pendant with ~2–4s lag |
+| 👤 | **Named speaker identification** — "Rahul" instead of SPEAKER_00 |
+| ⚡ | **Fast speaker ID** — resemblyzer embed (~0.1s) vs pyannote diarization (~15s) |
+| 🧠 | **Direct Omi memory creation** — POSTs transcript to Omi API after 30s silence, no 2-min wait |
+| 🚫 | **TV/movie voice filter** — blocks ambient entertainment audio from being saved as memories |
+| 📱 | **Live transcript UI** — real-time dashboard at `/ui/live` with speaker colour coding |
+| 🔊 | **Voice enrollment UI** — listen to unknown clips, assign names in one click |
+| 🏋️ | **Benchmark tool** — per-stage RTF measurement, hardware comparison |
+| 🐳 | **Multi-arch Docker** — arm64 (Raspberry Pi) + amd64 (Linux/CUDA) |
+| 🔔 | **Push notifications** — ntfy.sh alerts for pipeline events |
 
 ---
 
-## Architecture
+## How It Works
 
-```
-Omi wearable
-     │  HTTP (audio chunks)
-     ▼
-Cloudflare Tunnel  ──►  omi-whisperx (port 8080)
-                              │
-                    ┌─────────┴──────────┐
-                    │   FastAPI / uvicorn │
-                    └─────────┬──────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        WhisperX         Diarization     VoiceEncoder
-       (CTranslate2)    (pyannote-audio) (resemblyzer)
-       CPU / CUDA        MPS / CUDA / CPU   CPU only
-              │               │               │
-              └───────────────┼───────────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │   Content Filter   │
-                    │  NLI → Ollama (opt)│
-                    └─────────┬──────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │  JSON response to  │
-                    │    Omi app         │
-                    └────────────────────┘
+### End-to-End Flow
+
+```mermaid
+sequenceDiagram
+    participant P as Omi Pendant
+    participant CF as Cloudflare Tunnel
+    participant S as omi-whisperx
+    participant O as Omi Cloud API
+
+    P->>CF: PCM16 audio frames (WebSocket)
+    CF->>S: wss://your-domain.com/live
+    Note over S: VAD Gate — flush on 0.5s silence
+    S->>S: WhisperX transcribe (~2–4s)
+    S->>S: Resemblyzer speaker ID (~0.1s)
+    S-->>P: {"segments": [...]} → shown in app
+    Note over S: 30s silence timer
+    S->>O: POST /conversations/from-segments
+    O-->>S: {"id": "conv-uuid"}
+    Note over O: AI processing: title, action items, memory
 ```
 
-**Inference pipeline per audio chunk:**
+### Speaker Identification Pipeline
 
-1. Receive audio → emit SSE `audio_received`
-2. Transcribe with WhisperX → emit `transcribed`
-3. Align to word-level timestamps
-4. Diarize speakers (SPEAKER_00, SPEAKER_01 …)
-5. Embed each speaker utterance (voice vector)
-6. Resolve speaker names via cosine similarity against stored profiles
-7. Classify content (NLI → Ollama) → emit `nli_result` / `ollama_result` / `filtered` / `transcript`
-8. Return JSON with segments, full text, language, and duration
+```mermaid
+flowchart LR
+    A[Audio chunk] --> B[WhisperX\ntranscribe]
+    B --> C[Resemblyzer\nembed utterance\n~0.1s]
+    C --> D{Cosine similarity\nvs enrolled profiles}
+    D -->|≥ threshold\n0.85| E[Named speaker\nRahul Sharma]
+    D -->|< threshold| F{Blocked voice?}
+    F -->|Yes| G[Discard\nsilently]
+    F -->|No| H[UNKNOWN\nSave clip for review]
+    H --> I[/ui/speakers\nAssign name]
+    I --> J[Enroll →\naverage embedding]
+```
+
+### Omi Memory Pipeline (bypassing 2-min timeout)
+
+```mermaid
+sequenceDiagram
+    participant App as Omi iOS App
+    participant S as omi-whisperx
+    participant OB as Omi Backend
+
+    Note over App,OB: Standard path (built-in STT)
+    App->>OB: Audio via Omi backend WS
+    OB->>OB: Deepgram STT
+    OB-->>App: Segments (real-time)
+    Note over OB: Wait conversation_timeout (120s)
+    OB->>OB: LLM process → memory created
+
+    Note over App,OB: omi-whisperx path
+    App->>S: Audio via custom STT WS
+    S-->>App: Segments (real-time, ~3s lag)
+    Note over S: 30s silence debounce
+    S->>OB: POST /v1/dev/user/conversations/from-segments
+    OB->>OB: LLM process → memory created
+    Note over S,OB: Total delay: ~35s vs ~120s
+```
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+### 1. Prerequisites
 
 - Python 3.12
-- `ffmpeg` and `libsndfile1` (system packages)
-- A [HuggingFace token](https://huggingface.co/settings/tokens) — required to download the diarization model ([pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)); you must also accept the model's license on HuggingFace
+- `ffmpeg` + `libsndfile1`
+- [HuggingFace token](https://huggingface.co/settings/tokens) — accept [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) license
+- Omi API key — from [Omi Developer Settings](https://app.omi.me/apps)
 
-### 1. Clone & configure
+### 2. Clone & configure
 
 ```bash
 git clone https://github.com/Rahulsharma0810/omi-whisperx
 cd omi-whisperx
 cp .env.example .env
+# Edit .env — set HF_TOKEN and OMI_API_KEY at minimum
 ```
 
-Edit `.env` and set at minimum:
-
-```env
-WHISPER_MODEL=medium   # or small / large-v2
-HF_TOKEN=hf_...        # your HuggingFace token
-```
-
-### 2. Start the server
+### 3. Start
 
 ```bash
 ./start.sh
 ```
 
-This creates a Python 3.12 venv at `~/.venvs/whisperx`, installs dependencies, and launches uvicorn on **port 8080**.
+Creates `~/.venvs/whisperx`, installs deps, launches on **:8080**. First start downloads models (~2–4 GB).
 
-First start downloads WhisperX and diarization models (~2–4 GB). Subsequent starts are fast.
+### 4. Expose publicly
+
+Omi pendant needs HTTPS. Use [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/):
+
+```bash
+cloudflared tunnel run --url http://localhost:8080
+```
+
+### 5. Configure Omi iOS app
+
+In Omi → Settings → Developer → **Cloud Provider > Custom**:
+
+| Field | Value |
+|---|---|
+| WebSocket URL | `wss://your-domain.com/live` |
+| Sample Rate | `16000` |
+| Language | `en` (or leave blank for auto-detect) |
+
+Enable **VAD Gate** in Omi app settings for best performance (strips silence before sending).
 
 ---
 
 ## Docker
 
-### Pull and run
-
 ```bash
 docker run -d \
   --name omi-whisperx \
   -p 8080:8080 \
-  -e WHISPER_MODEL=medium \
   -e HF_TOKEN=hf_... \
-  -v ~/.omi/huggingface:/data/huggingface \
-  -v ~/.omi/speakers:/data/speakers \
+  -e OMI_API_KEY=omi_dev_... \
+  -e WHISPER_MODEL=small \
+  -v ~/.omi:/data \
   ghcr.io/rahulsharma0810/omi-whisperx:latest
 ```
 
-### Docker Compose (Portainer or standalone)
+### Docker Compose
 
 ```yaml
 version: "3.9"
@@ -127,72 +168,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      HF_TOKEN: your_token_here
-      WHISPER_MODEL: medium          # tiny | base | small | medium | large-v2
-      WHISPER_BATCH_SIZE: "4"        # use 4 on Raspberry Pi 5
-      SPEAKER_THRESHOLD: "0.80"
-      CONTENT_FILTER: "true"
-      NLI_ENABLED: "true"
-      NLI_THRESHOLD: "0.85"
-      OLLAMA_ENABLED: "false"        # set true + OLLAMA_URL to enable Tier 2
-      OLLAMA_URL: "http://192.168.1.X:11434"
-      OLLAMA_MODEL: "gemma2:2b"
+      HF_TOKEN: hf_your_token
+      OMI_API_KEY: omi_dev_your_key
+      OMI_USER_NAME: "Your Name"       # marks your segments as is_user=true
+      WHISPER_MODEL: small             # tiny|base|small|medium|large-v2
+      WHISPER_BATCH_SIZE: "4"          # use 4 on Raspberry Pi 5
+      SPEAKER_THRESHOLD: "0.85"
+      FAST_SPEAKER: "true"             # resemblyzer (~0.1s) vs pyannote (~15s)
+      TRUST_CLIENT_VAD: "true"         # use Omi VAD Gate, skip server VAD
     volumes:
       - omi_data:/data
 volumes:
   omi_data:
 ```
-
-> **Note:** Models are not baked into the image. They download on first container start (~5 min).
-
----
-
-## Raspberry Pi 5 Setup
-
-```bash
-# Install system dependencies
-sudo apt-get install -y python3.12 python3.12-venv ffmpeg libsndfile1
-
-# Create venv and install CPU-only torch first
-python3.12 -m venv ~/.venvs/whisperx
-source ~/.venvs/whisperx/bin/activate
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-```
-
-RPi5 notes:
-- Set `WHISPER_BATCH_SIZE=4` (default 16 is too high)
-- Expect diarization ~60–120s for 30s of audio (vs ~18s on Mac M2)
-- If booting from SD card, set `HF_HOME` to a USB SSD path for the model cache
-
----
-
-## Omi App Configuration
-
-In the Omi app, add a **Transcript Provider** pointing at your server (use a public URL — Cloudflare tunnel recommended):
-
-| Field | Value |
-|---|---|
-| URL | `https://your-server.example.com/inference` |
-| Request type | `multipart_form` |
-| Audio field name | `file` |
-| Params | `temperature=0.0`, `response_format=verbose_json` |
-
-**Response schema mapping:**
-
-```json
-{
-  "segments_path": "segments",
-  "segments_text_field": "text",
-  "segments_start_field": "start",
-  "segments_end_field": "end",
-  "segments_speaker_field": "speaker",
-  "text_path": "text",
-  "default_segment_duration": 5.0
-}
-```
-
-Omit the `language` param to let Whisper auto-detect per chunk — best for multilingual / code-switching audio.
 
 ---
 
@@ -200,243 +188,248 @@ Omit the `language` param to let Whisper auto-detect per chunk — best for mult
 
 | URL | Description |
 |---|---|
-| `/ui` | Live monitor — real-time pipeline events as audio is processed |
-| `/ui/speakers` | Speaker manager — listen to unidentified clips, assign names, enroll, rename, delete |
-| `/benchmark` | Benchmark tool — upload/record/synthetic audio, per-stage RTF, side-by-side comparison |
-| `/health` | Full system status — model, devices, speaker count, filter config, app version |
+| `/ui/live` | **Live transcript** — real-time segments with speaker colours, lag metrics |
+| `/ui` | **Pipeline monitor** — SSE stream of every inference stage |
+| `/ui/speakers` | **Speaker manager** — listen to unknown clips, assign names, enroll, block |
+| `/benchmark` | **Benchmark** — per-stage RTF, hardware comparison |
+| `/health` | System status — model, devices, speaker count, config |
 
----
+### Live Transcript (`/ui/live`)
 
-## API Reference
+![Live Transcript UI](https://raw.githubusercontent.com/Rahulsharma0810/omi-whisperx/main/docs/live-ui-preview.png)
 
-### `POST /inference`
-
-Main transcription endpoint. Accepts a multipart audio file.
-
-**Form fields:** `file` (audio), `language` (optional), `temperature` (default `0.0`), `response_format` (default `verbose_json`)
-
-**Response:**
-
-```json
-{
-  "segments": [
-    { "start": 0.0, "end": 2.4, "text": "Hello world", "speaker": "Rahul" }
-  ],
-  "text": "Hello world",
-  "language": "en",
-  "duration": 5.2
-}
+Segments stream in real time with speaker name, colour coding, and lag metrics:
 ```
-
-When content is filtered (entertainment detected), returns `{"segments": [], "text": ""}` so Omi creates no memory.
-
----
-
-### Speaker profiles
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/speakers` | List enrolled speaker names and capture state |
-| `POST` | `/speakers` | Enroll from audio — form fields: `name`, `file` (WAV/M4A/MP3) |
-| `PATCH` | `/speakers/{name}` | Rename — form field: `new_name` |
-| `DELETE` | `/speakers/{name}` | Delete one profile |
-| `DELETE` | `/speakers` | Reset all profiles and capture state |
-
-### Unidentified recordings
-
-Up to 5 clips are saved per unique unknown voice. Visit `/ui/speakers` to listen and assign names.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/speakers/recordings` | List clips with best-match speaker suggestion and similarity score |
-| `GET` | `/speakers/recordings/{id}/audio` | Stream WAV audio for playback |
-| `POST` | `/speakers/recordings/{id}/assign` | Assign name → enroll speaker, delete clip. Form field: `name` |
-| `POST` | `/speakers/recordings/purge` | Delete all clips that now match an enrolled speaker |
-| `POST` | `/speakers/recordings/{id}/block` | Block voice permanently — saves to blocked list, deletes clip and all similar clips |
-| `DELETE` | `/speakers/recordings/{id}` | Discard a clip without enrolling |
-| `GET` | `/speakers/blocked` | Count of blocked voices |
-| `DELETE` | `/speakers/blocked` | Clear all blocked voices |
-
----
-
-### Live dashboard
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/events` | SSE stream for `/ui` dashboard |
-
-Events emitted per chunk:
-
-| Event | When | Key fields |
-|---|---|---|
-| `audio_received` | Start of inference | `chunk_id`, `size_kb` |
-| `transcribed` | After WhisperX | `chunk_id`, `lang`, `segments` |
-| `nli_result` | After NLI | `chunk_id`, `decision`, `confidence`, `scores` |
-| `ollama_result` | After Ollama | `chunk_id`, `decision`, `raw_response` |
-| `filtered` | Chunk dropped | `chunk_id`, `preview` |
-| `transcript` | Chunk saved | `chunk_id`, `lang`, `duration`, `segments[]` |
-
----
-
-### Benchmark
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/benchmark` | Benchmark UI |
-| `GET` | `/benchmark/events` | SSE stream for benchmark progress |
-| `POST` | `/benchmark/run` | Start benchmark — form fields: `trials`, `language`, `duration`, optional audio `file` |
-| `GET` | `/benchmark/status` | `{"running": true/false}` |
-| `POST` | `/benchmark/cancel` | Cancel a running benchmark |
-
----
-
-### `GET /health`
-
-Full system status: model, devices, speaker profiles, filter config, app version.
-
-### `GET /filter`
-
-Content filter configuration (enabled flags, NLI model, Ollama URL/model/timeout).
-
----
-
-## Configuration Reference
-
-All settings are environment variables. Copy `.env.example` to `.env` to get started.
-
-### Whisper
-
-| Variable | Default | Description |
-|---|---|---|
-| `WHISPER_MODEL` | `medium` | Model size: `tiny` `base` `small` `medium` `large-v2` |
-| `WHISPER_BATCH_SIZE` | `16` | Transcription batch size (use `4` on RPi5) |
-| `WHISPER_INITIAL_PROMPT` | bilingual | Override the Whisper initial prompt |
-
-### HuggingFace
-
-| Variable | Default | Description |
-|---|---|---|
-| `HF_TOKEN` | — | **Required.** Token for diarization model download |
-
-### Speaker matching
-
-| Variable | Default | Description |
-|---|---|---|
-| `PROFILES_DIR` | `~/.omi/speakers` | Directory for voice embedding profiles |
-| `SPEAKER_THRESHOLD` | `0.80` | Cosine similarity cutoff for name resolution |
-
-### Content filter
-
-| Variable | Default | Description |
-|---|---|---|
-| `CONTENT_FILTER` | `true` | Set `false` to disable entirely |
-| `NLI_ENABLED` | `true` | Enable zero-shot NLI classifier (Tier 1) |
-| `NLI_MODEL` | `typeform/distilbert-base-uncased-mnli` | HuggingFace zero-shot model |
-| `NLI_THRESHOLD` | `0.85` | Confidence cutoff; below this escalates to Ollama |
-| `OLLAMA_ENABLED` | `false` | Enable Ollama fallback (Tier 2) |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama server address |
-| `OLLAMA_MODEL` | `gemma2:2b` | Ollama model name |
-| `OLLAMA_TIMEOUT` | `5` | Seconds before Ollama is abandoned (returns `keep`) |
-
-### Notifications
-
-| Variable | Default | Description |
-|---|---|---|
-| `NTFY_URL` | — | ntfy.sh topic URL for pipeline alerts |
-| `NTFY_TOKEN` | — | ntfy.sh auth token |
+audio@+2.3s → sent@+5.1s | lag=2.8s (queue=0.0s proc=2.8s)
+```
 
 ---
 
 ## Speaker Enrollment
 
-Three ways to enroll a speaker:
+Three ways to teach the system who's speaking:
 
-**1. Trigger phrase** — say during any conversation:
-> *"remember this voice as NAME"* / *"save this voice as NAME"* / *"recognize my voice as NAME"*
+### 1. Auto-capture → assign in UI
+Every unknown voice is saved as a short clip (max 5 per unique voice). Go to `/ui/speakers`, play each clip, type a name, click **Confirm**. Done.
 
-The next unrecognised speaker in that chunk is enrolled as NAME.
+### 2. Upload audio
+```bash
+curl -X POST http://localhost:8080/speakers \
+  -F "name=Alice" \
+  -F "file=@alice_voice.m4a"
+```
 
-**2. Upload or record at `/ui/speakers`** — upload any audio clip (WAV, M4A, MP3, voice note) or record directly from your browser mic. No cooperation from the other person required.
+### 3. Record in browser
+Open `/ui/speakers` → click the mic icon next to any name → speak for 5s → auto-enrolled.
 
-**3. Assign from recordings** — every time an unknown voice is heard, a short clip is saved automatically (max 5 per unique voice). Go to `/ui/speakers`, play each clip, and click **confirm** to assign a name. The similarity score shown next to each clip tells you how closely it matches enrolled speakers — use **confirm all suggestions** to bulk-assign in one click.
-
-Multiple assignments to the same name average the embeddings together, building a more robust voiceprint over time.
-
-**Blocking TV/movie voices** — when watching TV or a movie, unknown actor voices will appear in recordings. Click **block** on any clip to permanently ignore that voice. The embedding is saved to `~/.omi/blocked/` and that voice is never recorded again. Use **clear blocked** in the UI to undo all blocks. Unassigned clips auto-expire after `RECORDINGS_MAX_AGE_DAYS` days (default 7).
+### Blocking TV/movie voices
+Unknown voices from TV/movies appear in clips. Click **Block** on any clip → that voice is permanently ignored and never recorded again. Uses embedding similarity so it works even if the audio quality changes.
 
 ---
 
-## Content Filter
+## Configuration Reference
 
-The filter runs a two-tier cascade classifier on every transcript before Omi creates a memory. It drops entertainment audio (movies, TV shows, games, scripted fiction) and keeps real conversations, meetings, and educational content.
+All settings via environment variables. See `.env.example` for the full list.
 
-**Tier 1 — NLI (default on, local, fast)**
-- Runs a zero-shot HuggingFace classifier inside the process
-- Uses MPS on Apple Silicon, CUDA on Nvidia, CPU otherwise
-- If confidence ≥ `NLI_THRESHOLD` (0.85) → decision is final
-- If confidence < threshold → escalates to Tier 2
+### Core
 
-**Tier 2 — Ollama (default off)**
-- HTTP POST to an Ollama instance with a one-shot prompt
-- Only called when NLI is uncertain
-- Times out after `OLLAMA_TIMEOUT` seconds → safe default: `keep`
+| Variable | Default | Description |
+|---|---|---|
+| `WHISPER_MODEL` | `small` | `tiny` `base` `small` `medium` `large-v2` |
+| `WHISPER_BATCH_SIZE` | `16` | Lower to `4` on Raspberry Pi 5 |
+| `HF_TOKEN` | — | **Required** — HuggingFace token |
 
-**Safe defaults:** on any error (model failure, Ollama unreachable), the filter returns `keep` — content is never silently dropped.
+### Speaker Identification
+
+| Variable | Default | Description |
+|---|---|---|
+| `FAST_SPEAKER` | `true` | `true` = resemblyzer (~0.1s), `false` = pyannote (~15s) |
+| `SPEAKER_THRESHOLD` | `0.85` | Cosine similarity cutoff. Higher = stricter matching |
+| `PROFILES_DIR` | `~/.omi/speakers` | Speaker embedding storage |
+| `RECORDINGS_MAX_AGE_DAYS` | `7` | Auto-expire unknown clips after N days |
+
+### Live WebSocket
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRUST_CLIENT_VAD` | `true` | Trust Omi VAD Gate — skip server-side VAD, flush on 0.5s frame gap |
+| `SKIP_LIVE_ALIGN` | `true` | Skip word-level alignment in WS path (saves ~2s, not needed for Omi) |
+| `MAX_QUEUE_AGE` | `30` | Drop queued utterances older than N seconds |
+
+### Omi API Integration
+
+| Variable | Default | Description |
+|---|---|---|
+| `OMI_API_KEY` | — | Omi developer API key — enables direct conversation creation |
+| `OMI_USER_NAME` | — | Your name as enrolled speaker — marks your segments `is_user=true` |
+| `OMI_CONV_DEBOUNCE` | `30` | Seconds of silence before POSTing conversation to Omi API |
+| `OMI_API_BASE` | `https://api.omi.me/v1/dev/user` | Omi API base URL |
+
+### Content Filter (optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONTENT_FILTER` | `false` | Enable two-tier entertainment filter |
+| `NLI_ENABLED` | `false` | Tier 1: zero-shot NLI classifier |
+| `NLI_THRESHOLD` | `0.85` | Confidence cutoff — below escalates to Ollama |
+| `OLLAMA_ENABLED` | `false` | Tier 2: Ollama LLM fallback |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
+| `OLLAMA_MODEL` | `deepseek-v3.1:671b-cloud` | Ollama model name |
+
+---
+
+## API Reference
+
+### WebSocket `/live`
+
+Real-time STT for Omi pendant.
+
+**Query params:** `language`, `uid`, `sample_rate` (default `16000`), `codec` (default `opus`)
+
+**Omi sends:** Binary PCM16 frames (640 bytes = 20ms at 16kHz) + JSON control messages (`{"type": "CloseStream"}`)
+
+**Server sends:**
+```json
+{
+  "segments": [
+    {
+      "text": "Hello world",
+      "speaker": "Rahul Sharma",
+      "start": 0.0,
+      "end": 2.4
+    }
+  ]
+}
+```
+
+### `POST /inference`
+
+HTTP transcription endpoint (Omi Transcript Provider mode).
+
+```bash
+curl -X POST http://localhost:8080/inference \
+  -F "file=@audio.wav" \
+  -F "language=en" \
+  -F "response_format=verbose_json"
+```
+
+Response:
+```json
+{
+  "segments": [{"start": 0.0, "end": 2.4, "text": "Hello", "speaker": "Rahul"}],
+  "text": "Hello",
+  "language": "en",
+  "duration": 5.2
+}
+```
+
+### Speaker API
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/speakers` | List enrolled speakers |
+| `POST` | `/speakers` | Enroll — `name` + `file` form fields |
+| `PATCH` | `/speakers/{name}` | Rename |
+| `DELETE` | `/speakers/{name}` | Delete profile |
+| `GET` | `/speakers/recordings` | List unknown clips with similarity scores |
+| `POST` | `/speakers/recordings/{id}/assign` | Assign name → enroll |
+| `POST` | `/speakers/recordings/{id}/block` | Block voice permanently |
+| `DELETE` | `/speakers/recordings/{id}` | Discard clip |
+| `POST` | `/speakers/recordings/purge` | Delete clips that now match enrolled speakers |
+| `GET/DELETE` | `/speakers/blocked` | View / clear blocked voices |
+
+### SSE Events (`/events`)
+
+| Event | When | Key fields |
+|---|---|---|
+| `ws_connected` | Pendant connects | `uid`, `lang` |
+| `ws_audio` | First audio frame | `frame_bytes` |
+| `ws_transcript` | Utterance processed | `segments`, `lag` |
+| `ws_disconnected` | Pendant disconnects | `frames` |
+| `audio_received` | HTTP inference start | `chunk_id`, `size_kb` |
+| `transcribed` | After WhisperX | `chunk_id`, `lang`, `segments` |
+| `transcript` | Inference complete | `chunk_id`, `duration`, `segments` |
+
+---
+
+## Raspberry Pi 5 Setup
+
+```bash
+sudo apt-get install -y python3.12 python3.12-venv ffmpeg libsndfile1
+python3.12 -m venv ~/.venvs/whisperx
+source ~/.venvs/whisperx/bin/activate
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+
+# Recommended .env for RPi5
+WHISPER_MODEL=base
+WHISPER_BATCH_SIZE=4
+FAST_SPEAKER=true
+TRUST_CLIENT_VAD=true
+SKIP_LIVE_ALIGN=true
+```
+
+Expect ~2–3s per utterance with `base` model on RPi5.
+
+---
+
+## Hardware Support
+
+| Hardware | Whisper device | Diarization | Notes |
+|---|---|---|---|
+| Mac Apple Silicon | CPU + int8 | MPS | Best dev setup |
+| Linux + CUDA | CUDA + float16 | CUDA | Fastest inference |
+| Raspberry Pi 5 | CPU + int8 | CPU | Use `base`/`tiny` model |
+| Linux CPU-only | CPU + int8 | CPU | Use `base`/`tiny` model |
+
+> CTranslate2 (Whisper backend) and resemblyzer (speaker encoder) do not support MPS — CPU is used intentionally.
 
 ---
 
 ## Benchmarking
 
 ```bash
-# Quick benchmark — no diarization, no HF_TOKEN needed
-python benchmark.py --no-diarization --no-embedding --language en --trials 1
+# Quick (no HF_TOKEN needed)
+python benchmark.py --no-diarization --no-embedding --language en --trials 3
 
 # Full pipeline on real audio
 python benchmark.py audio.wav --trials 3 --output json --output-file results_mac.json
 
-# Compare two hardware profiles
+# Compare two machines
 python benchmark.py --compare results_mac.json results_rpi5.json
 ```
 
-Or use the interactive UI at `http://localhost:8080/benchmark`.
+Or use the interactive UI at `/benchmark`.
 
 ---
 
-## Hardware Support
-
-| Hardware | Whisper | Diarization | Voice Encoder |
-|---|---|---|---|
-| Mac (Apple Silicon) | CPU + int8 | MPS | CPU |
-| Linux + CUDA | CUDA + float16 | CUDA | CPU |
-| Raspberry Pi 5 | CPU + int8 | CPU | CPU |
-| Linux (CPU only) | CPU + int8 | CPU | CPU |
-
-> CTranslate2 (Whisper backend) does not support MPS. resemblyzer does not support MPS. Both constraints are intentional — do not change them.
-
----
-
-## Exposing to the Internet
-
-The Omi pendant needs a public HTTPS URL. The recommended approach is a **Cloudflare Tunnel**:
+## launchctl (macOS background service)
 
 ```bash
-cloudflared tunnel run --url http://localhost:8080
-```
+# Install
+cp com.rvs.whisperX.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.rvs.whisperX.plist
 
-Or configure a named tunnel via `cloudflared-config.yml` for a stable hostname.
+# Restart after config changes
+launchctl unload ~/Library/LaunchAgents/com.rvs.whisperX.plist
+launchctl load ~/Library/LaunchAgents/com.rvs.whisperX.plist
+
+# Logs
+tail -f ~/omi-whisperx/server.log
+```
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome. A few guidelines:
+PRs and issues welcome.
 
-- Do not add MPS support to the WhisperX call — CTranslate2 does not support it
-- Do not add MPS support to `VoiceEncoder` — resemblyzer does not support it
-- `load_align_model` must stay per-request (language varies per audio chunk)
-- New pip dependencies must have `aarch64` wheels — the service must run on Raspberry Pi 5
-- `classify_content()` must stay `async` — Ollama calls are async HTTP
-- Do not call `_classify_with_nli()` directly from async code without `asyncio.to_thread`
+**Do not:**
+- Add MPS to WhisperX calls — CTranslate2 doesn't support it
+- Add MPS to `VoiceEncoder` — resemblyzer doesn't support it
+- Add pip deps without checking `aarch64` wheels exist (must run on RPi5)
+- Make `classify_content()` synchronous — Ollama call is async HTTP
+- Call NLI pipeline directly from async code without `asyncio.to_thread`
 
 ---
 
