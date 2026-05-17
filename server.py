@@ -27,8 +27,8 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, WebSocket, WebSock
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from typing import Optional
 import whisperx
-from whisperx.diarize import DiarizationPipeline, assign_word_speakers
 from resemblyzer import VoiceEncoder, preprocess_wav
+from mlx_audio.vad import load as load_sortformer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -396,8 +396,8 @@ logger.info(
 )
 model = LightningWhisperMLX(model=MODEL_SIZE, batch_size=BATCH_SIZE, quant=None)
 
-logger.info("Loading diarization pipeline ...")
-diarize_model = DiarizationPipeline(token=HF_TOKEN, device=TORCH_DEVICE)
+logger.info("Loading Sortformer MLX diarization model ...")
+diarize_model = load_sortformer("mlx-community/diar_streaming_sortformer_4spk-v2.1-fp32")
 
 # Cache align models per language — loading from disk per utterance was ~5-10s of the lag
 _align_model_cache: dict = {}  # lang -> (align_model, metadata)
@@ -553,6 +553,37 @@ def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.nd
     }
 
 
+def _get_sortformer_embeddings(audio_path: str, diarize_segs) -> dict[str, np.ndarray]:
+    """Extract per-speaker voice embeddings from Sortformer diarization segments.
+
+    diarize_segs: list of objects with .start (seconds), .end (seconds), .speaker (int 0-3)
+    Returns {"SPEAKER_00": np.ndarray, ...}
+    """
+    import soundfile as sf
+    audio, sr = sf.read(audio_path)
+    speaker_chunks: dict[str, list[np.ndarray]] = {}
+
+    for ds in diarize_segs:
+        label = f"SPEAKER_{ds.speaker:02d}"
+        start = int(ds.start * sr)
+        end = int(ds.end * sr)
+        chunk = audio[start:end]
+        if len(chunk) < sr:  # skip < 1s segments
+            continue
+        try:
+            wav = preprocess_wav(chunk.astype(np.float32), source_sr=sr)
+            emb = voice_encoder.embed_utterance(wav)
+            speaker_chunks.setdefault(label, []).append(emb)
+        except Exception:
+            continue
+
+    return {
+        label: np.mean(embs, axis=0)
+        for label, embs in speaker_chunks.items()
+        if embs
+    }
+
+
 def _is_blocked(embedding: np.ndarray, threshold: float) -> bool:
     """Return True if this embedding matches any blocked voice."""
     for p in BLOCKED_DIR.glob("*.npy"):
@@ -609,18 +640,31 @@ def save_speaker_recording(audio_path: str, label: str, diarize_segments, chunk_
         # Collect up to 20s of this speaker's audio
         chunks = []
         total = 0.0
-        for _, row in diarize_segments.iterrows():
-            if row.get("speaker") != label:
-                continue
-            start = int(row["start"] * sr)
-            end = int(row["end"] * sr)
-            seg = raw[start:end]
-            if len(seg) < sr * 0.5:  # skip < 0.5s
-                continue
-            chunks.append(seg)
-            total += len(seg) / sr
-            if total >= 20.0:
-                break
+        if diarize_segments is not None:
+            # Sortformer segments: objects with .start, .end, .speaker (int)
+            # or pyannote DataFrame with "speaker" column
+            if hasattr(diarize_segments, "iterrows"):
+                iter_segs = [
+                    (row.get("speaker"), row["start"], row["end"])
+                    for _, row in diarize_segments.iterrows()
+                ]
+            else:
+                iter_segs = [
+                    (f"SPEAKER_{ds.speaker:02d}", ds.start, ds.end)
+                    for ds in diarize_segments
+                ]
+            for spk, seg_start, seg_end in iter_segs:
+                if spk != label:
+                    continue
+                start = int(seg_start * sr)
+                end = int(seg_end * sr)
+                seg = raw[start:end]
+                if len(seg) < sr * 0.5:
+                    continue
+                chunks.append(seg)
+                total += len(seg) / sr
+                if total >= 20.0:
+                    break
         if not chunks:
             return
         if total < 5.0:  # skip clips too short for a reliable embedding
@@ -870,6 +914,22 @@ async def _process_live_audio(
         t_transcribe = time.time()
         detected_lang = result.get("language", language or "hi")
 
+        # lightning-whisper-mlx returns segments as [start_frame, end_frame, text]
+        # Convert to WhisperX-compatible dicts for downstream diarization/alignment
+        _HOP = 160; _SR = 16000
+        raw_segs = result.get("segments", [])
+        if raw_segs and isinstance(raw_segs[0], (list, tuple)):
+            result["segments"] = [
+                {
+                    "text": s[2],
+                    "start": round(s[0] * _HOP / _SR, 2),
+                    "end": round(s[1] * _HOP / _SR, 2),
+                    "avg_logprob": 0.0,
+                    "no_speech_prob": 0.0,
+                }
+                for s in raw_segs if len(s) >= 3
+            ]
+
         if SKIP_LIVE_ALIGN:
             t_align = time.time()  # skip — word timestamps not needed for Omi live path
         else:
@@ -888,17 +948,30 @@ async def _process_live_audio(
             t_align = time.time()
 
         segments = result.get("segments", [])
-        # Full pyannote diarization — per-segment speaker labels
-        diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
-        result_with_speakers = assign_word_speakers(diarize_segs, result)
-        segments = result_with_speakers.get("segments", [])
-        speaker_embeddings = await asyncio.to_thread(get_speaker_embeddings, audio_path, diarize_segs)
+        # Sortformer MLX diarization — per-segment speaker labels via timestamp overlay
+        diarize_result = await asyncio.to_thread(diarize_model.generate, audio_path, threshold=0.5)
+        diarize_segs = diarize_result.segments  # list of objects with .start, .end, .speaker (int)
+
+        # Build per-speaker audio embeddings for name resolution
+        # Sortformer gives speaker index (0-3); we embed audio from each speaker's intervals
+        speaker_embeddings = await asyncio.to_thread(
+            _get_sortformer_embeddings, audio_path, diarize_segs
+        )
         t_diarize = time.time()
+
         formatted = []
         for seg in segments:
             if is_hallucination(seg):
                 continue
-            label = seg.get("speaker", "UNKNOWN")
+            seg_start = seg.get("start", 0.0)
+            seg_end = seg.get("end", 0.0)
+            seg_mid = (seg_start + seg_end) / 2
+            # Assign speaker by finding which diarize segment covers segment midpoint
+            label = "UNKNOWN"
+            for ds in diarize_segs:
+                if ds.start <= seg_mid <= ds.end:
+                    label = f"SPEAKER_{ds.speaker:02d}"
+                    break
             resolved = resolve_name(label, speaker_embeddings)
             if resolved == "BLOCKED":
                 continue
@@ -909,8 +982,8 @@ async def _process_live_audio(
             formatted.append({
                 "text": seg_text,
                 "speaker": resolved,
-                "start": round(seg.get("start", 0.0), 2),
-                "end": round(seg.get("end", 0.0), 2),
+                "start": round(seg_start, 2),
+                "end": round(seg_end, 2),
             })
 
         logger.info(
@@ -1341,6 +1414,14 @@ async def inference(
             await notify("Transcription failed", f"chunk #{chunk_id}\n{type(e).__name__}: {e}", priority="urgent", tags="rotating_light")
             raise
         detected_lang = result.get("language", language or "hi")
+        # Normalise lightning-whisper-mlx [start_frame, end_frame, text] segments
+        _raw = result.get("segments", [])
+        if _raw and isinstance(_raw[0], (list, tuple)):
+            result["segments"] = [
+                {"text": s[2], "start": round(s[0]*160/16000,2), "end": round(s[1]*160/16000,2),
+                 "avg_logprob": 0.0, "no_speech_prob": 0.0}
+                for s in _raw if len(s) >= 3
+            ]
 
         # Alignment: fall back to "hi" if detected language has no alignment model
         try:
@@ -1363,17 +1444,27 @@ async def inference(
             "segments": len(result.get("segments", [])),
         })
 
-        diarize_segments = diarize_model(audio_path)
-        result = assign_word_speakers(diarize_segments, result)
+        # Sortformer MLX diarization
+        diarize_result = diarize_model.generate(audio_path, threshold=0.5)
+        diarize_segs = diarize_result.segments
+
+        # Overlay speaker labels onto whisper segments by midpoint lookup
         segments = result.get("segments", [])
+        for seg in segments:
+            seg_mid = (seg.get("start", 0.0) + seg.get("end", 0.0)) / 2
+            seg["speaker"] = "UNKNOWN"
+            for ds in diarize_segs:
+                if ds.start <= seg_mid <= ds.end:
+                    seg["speaker"] = f"SPEAKER_{ds.speaker:02d}"
+                    break
 
         # Extract per-speaker embeddings for name resolution
-        speaker_embeddings = get_speaker_embeddings(audio_path, diarize_segments)
+        speaker_embeddings = _get_sortformer_embeddings(audio_path, diarize_segs)
 
         # Save clips for unrecognized speakers so user can label them later
         for label, emb in speaker_embeddings.items():
             if resolve_name(label, speaker_embeddings) == label:  # still anonymous
-                save_speaker_recording(audio_path, label, diarize_segments, chunk_id, emb)
+                save_speaker_recording(audio_path, label, diarize_segs, chunk_id, emb)
 
         # Check for "remember this voice as NAME" trigger
         triggered_name = check_capture_trigger(segments)
@@ -1562,13 +1653,23 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
                 emit_bench("bench_stage", {"trial": trial, "stage": "alignment",
                                            "elapsed": round(timings["alignment"], 3)})
 
-            # --- Diarization ---
+            # --- Diarization (Sortformer MLX) ---
             diarize_segs = None
             if not no_diarization:
                 t0 = time.perf_counter()
                 try:
-                    diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
-                    result = assign_word_speakers(diarize_segs, result)
+                    diarize_result = await asyncio.to_thread(
+                        diarize_model.generate, audio_path, threshold=0.5
+                    )
+                    diarize_segs = diarize_result.segments
+                    segments = result.get("segments", [])
+                    for seg in segments:
+                        seg_mid = (seg.get("start", 0.0) + seg.get("end", 0.0)) / 2
+                        seg["speaker"] = "UNKNOWN"
+                        for ds in diarize_segs:
+                            if ds.start <= seg_mid <= ds.end:
+                                seg["speaker"] = f"SPEAKER_{ds.speaker:02d}"
+                                break
                 except Exception as e:
                     logger.warning(f"[BENCH] Diarization skipped: {e}")
                 timings["diarization"] = time.perf_counter() - t0
@@ -1579,16 +1680,7 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
             if not no_embedding and diarize_segs is not None:
                 t0 = time.perf_counter()
                 try:
-                    # whisperx.load_audio handles any ffmpeg-supported format (m4a, mp3, etc.)
-                    raw = whisperx.load_audio(audio_path)  # float32 mono at 16kHz
-                    sr = 16000
-                    audio_arr = raw
-                    for _, row in diarize_segs.iterrows():
-                        chunk = audio_arr[int(row["start"] * sr):int(row["end"] * sr)]
-                        if len(chunk) < sr:
-                            continue
-                        wav = preprocess_wav(chunk.astype(np.float32), source_sr=sr)
-                        voice_encoder.embed_utterance(wav)
+                    await asyncio.to_thread(_get_sortformer_embeddings, audio_path, diarize_segs)
                 except Exception as e:
                     logger.warning(f"[BENCH] Embedding skipped: {e}")
                 timings["embedding"] = time.perf_counter() - t0
