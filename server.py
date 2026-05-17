@@ -1001,11 +1001,18 @@ def _has_speech_webrtcvad(frames: list[bytes], sample_rate: int) -> bool:
     return speech_frames >= max(1, valid_frames * 4 // 10)
 
 
+_omi_rate_limit_until: float = 0.0  # epoch seconds — don't POST before this time
+
 async def _post_segments_to_omi(segments: list[dict], language: str, started_at: float, finished_at: float) -> None:
     """POST accumulated transcript segments to Omi API to create a conversation immediately.
     Bypasses Omi's 2-min conversation_timeout — conversation appears in app within seconds.
     """
+    global _omi_rate_limit_until
     if not OMI_API_KEY or not segments:
+        return
+    if time.time() < _omi_rate_limit_until:
+        remaining = int(_omi_rate_limit_until - time.time())
+        logger.debug(f"[OMI] Rate-limited — skipping post, {remaining}s remaining")
         return
     import datetime, json as _json, urllib.request
 
@@ -1043,7 +1050,14 @@ async def _post_segments_to_omi(segments: list[dict], language: str, started_at:
                 conv_id = body.get("id", "?")
                 logger.info(f"[OMI] Conversation created: {conv_id} ({len(payload['transcript_segments'])} segs)")
         except urllib.error.HTTPError as e:
-            logger.warning(f"[OMI] API error {e.code}: {e.read().decode()[:200]}")
+            body = e.read().decode()[:300]
+            logger.warning(f"[OMI] API error {e.code}: {body}")
+            if e.code == 429:
+                # Parse "Try again in Xs" from response body
+                m = re.search(r"(\d+)\s*s", body)
+                wait = int(m.group(1)) if m else 60
+                _omi_rate_limit_until = time.time() + wait
+                logger.warning(f"[OMI] Rate limited — backing off {wait}s")
         except Exception as e:
             logger.warning(f"[OMI] Failed to post conversation: {e}")
 
