@@ -59,15 +59,15 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    A[Audio chunk] --> B[WhisperX\ntranscribe]
-    B --> C[Resemblyzer\nembed utterance\n~0.1s]
-    C --> D{Cosine similarity\nvs enrolled profiles}
-    D -->|≥ threshold\n0.85| E[Named speaker\nRahul Sharma]
-    D -->|< threshold| F{Blocked voice?}
-    F -->|Yes| G[Discard\nsilently]
-    F -->|No| H[UNKNOWN\nSave clip for review]
-    H --> I[/ui/speakers\nAssign name]
-    I --> J[Enroll →\naverage embedding]
+    A[Audio chunk] --> B[WhisperX<br/>transcribe]
+    B --> C[Resemblyzer<br/>embed utterance<br/>~0.1s]
+    C --> D{Cosine similarity<br/>vs enrolled profiles}
+    D -->|above threshold| E[Named speaker<br/>Rahul Sharma]
+    D -->|below threshold| F{Blocked voice?}
+    F -->|Yes| G[Discard<br/>silently]
+    F -->|No| H[UNKNOWN<br/>Save clip for review]
+    H --> I[ui/speakers<br/>Assign name]
+    I --> J[Enroll<br/>average embedding]
 ```
 
 ### Omi Memory Pipeline (bypassing 2-min timeout)
