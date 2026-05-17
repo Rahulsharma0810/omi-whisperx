@@ -118,11 +118,6 @@ APP_VERSION = _detect_version()
 
 MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
 BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
-# FAST_SPEAKER=true  → resemblyzer embed of whole utterance (~0.1s) instead of pyannote (~15s)
-#   Identifies enrolled speakers, saves clips for unknown voices, labels all segs with same speaker
-#   Best for pendant use (1 speaker per utterance). Multi-speaker utterances get single label.
-# FAST_SPEAKER=false → full pyannote diarization (accurate multi-speaker, but ~15s per utterance)
-FAST_SPEAKER = os.environ.get("FAST_SPEAKER", "true").lower() == "true"
 SKIP_DIARIZE = os.environ.get("SKIP_DIARIZE", "false").lower() == "true"  # legacy: no speaker id at all
 # Skip word-level alignment in live WebSocket path — saves ~2s, Omi only needs segment-level timestamps
 SKIP_LIVE_ALIGN = os.environ.get("SKIP_LIVE_ALIGN", "true").lower() == "true"
@@ -393,13 +388,13 @@ async def classify_content(text: str, chunk_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Load models
 # ---------------------------------------------------------------------------
+from lightning_whisper_mlx import LightningWhisperMLX
+
 logger.info(
-    f"Loading whisperx model '{MODEL_SIZE}' | "
-    f"whisper={WHISPER_DEVICE}/{COMPUTE_TYPE} torch={TORCH_DEVICE}"
+    f"Loading lightning-whisper-mlx model '{MODEL_SIZE}' | "
+    f"batch_size={BATCH_SIZE} torch={TORCH_DEVICE}"
 )
-model = whisperx.load_model(MODEL_SIZE, WHISPER_DEVICE, compute_type=COMPUTE_TYPE)
-# Lower VAD thresholds for pendant mic (default 0.5/0.363 rejects quiet/distant speech)
-model._vad_params.update({"vad_onset": 0.3, "vad_offset": 0.2})
+model = LightningWhisperMLX(model=MODEL_SIZE, batch_size=BATCH_SIZE, quant=None)
 
 logger.info("Loading diarization pipeline ...")
 diarize_model = DiarizationPipeline(token=HF_TOKEN, device=TORCH_DEVICE)
@@ -870,7 +865,7 @@ async def _process_live_audio(
     try:
         result = await asyncio.to_thread(
             model.transcribe, audio_path,
-            language=language, task="transcribe", batch_size=BATCH_SIZE,
+            language=language,
         )
         t_transcribe = time.time()
         detected_lang = result.get("language", language or "hi")
@@ -893,57 +888,30 @@ async def _process_live_audio(
             t_align = time.time()
 
         segments = result.get("segments", [])
-        if FAST_SPEAKER:
-            # Embed whole utterance with resemblyzer (~0.1s) — match against enrolled speakers
-            speaker_name = await asyncio.to_thread(_fast_identify_speaker, audio_path)
-            t_diarize = time.time()
-            if speaker_name == "BLOCKED":
-                logger.debug("[WS] Utterance matches blocked voice — discarding")
-                return
-            formatted = []
-            for seg in segments:
-                if is_hallucination(seg):
-                    continue
-                seg_text = seg.get("text", "").strip()
-                if is_tv_filler(seg_text, speaker_name):
-                    logger.debug(f"[WS] TV filler dropped: {seg_text!r}")
-                    continue
-                formatted.append({
-                    "text": seg_text,
-                    "speaker": speaker_name,
-                    "start": round(seg.get("start", 0.0), 2),
-                    "end": round(seg.get("end", 0.0), 2),
-                })
-        elif SKIP_DIARIZE:
-            t_diarize = time.time()
-            formatted = []
-            for seg in segments:
-                if is_hallucination(seg):
-                    continue
-                formatted.append({
-                    "text": seg.get("text", "").strip(),
-                    "speaker": "SPEAKER_00",
-                    "start": round(seg.get("start", 0.0), 2),
-                    "end": round(seg.get("end", 0.0), 2),
-                })
-        else:
-            # Full pyannote diarization — accurate multi-speaker, ~15s
-            diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
-            result = assign_word_speakers(diarize_segs, result)
-            segments = result.get("segments", [])
-            speaker_embeddings = await asyncio.to_thread(get_speaker_embeddings, audio_path, diarize_segs)
-            t_diarize = time.time()
-            formatted = []
-            for seg in segments:
-                if is_hallucination(seg):
-                    continue
-                label = seg.get("speaker", "UNKNOWN")
-                formatted.append({
-                    "text": seg.get("text", "").strip(),
-                    "speaker": resolve_name(label, speaker_embeddings),
-                    "start": round(seg.get("start", 0.0), 2),
-                    "end": round(seg.get("end", 0.0), 2),
-                })
+        # Full pyannote diarization — per-segment speaker labels
+        diarize_segs = await asyncio.to_thread(diarize_model, audio_path)
+        result_with_speakers = assign_word_speakers(diarize_segs, result)
+        segments = result_with_speakers.get("segments", [])
+        speaker_embeddings = await asyncio.to_thread(get_speaker_embeddings, audio_path, diarize_segs)
+        t_diarize = time.time()
+        formatted = []
+        for seg in segments:
+            if is_hallucination(seg):
+                continue
+            label = seg.get("speaker", "UNKNOWN")
+            resolved = resolve_name(label, speaker_embeddings)
+            if resolved == "BLOCKED":
+                continue
+            seg_text = seg.get("text", "").strip()
+            if is_tv_filler(seg_text, resolved):
+                logger.debug(f"[WS] TV filler dropped: {seg_text!r}")
+                continue
+            formatted.append({
+                "text": seg_text,
+                "speaker": resolved,
+                "start": round(seg.get("start", 0.0), 2),
+                "end": round(seg.get("end", 0.0), 2),
+            })
 
         logger.info(
             f"[WS] {len(formatted)} segs | "
@@ -1368,8 +1336,6 @@ async def inference(
             result = model.transcribe(
                 audio_path,
                 language=language,
-                task="transcribe",
-                batch_size=BATCH_SIZE,
             )
         except Exception as e:
             await notify("Transcription failed", f"chunk #{chunk_id}\n{type(e).__name__}: {e}", priority="urgent", tags="rotating_light")
@@ -1572,8 +1538,7 @@ async def _run_bench(trials: int, language: str, no_alignment: bool,
             t0 = time.perf_counter()
             result = await asyncio.to_thread(
                 model.transcribe, audio_path,
-                language=language or None, task="transcribe",
-                batch_size=BATCH_SIZE,
+                language=language or None,
             )
             timings["transcription"] = time.perf_counter() - t0
             detected_lang = result.get("language", language or "en")

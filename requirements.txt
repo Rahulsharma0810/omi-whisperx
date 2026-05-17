@@ -1,4 +1,5 @@
 whisperx
+lightning-whisper-mlx
 fastapi
 uvicorn[standard]
 python-multipart
