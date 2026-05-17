@@ -2030,7 +2030,7 @@ async def enroll_speaker(name: str = Form(...), file: UploadFile = File(...)):
 @app.patch("/speakers/{name}")
 async def rename_speaker(name: str, new_name: str = Form(...)):
     """Rename an existing speaker profile."""
-    old_key = name.replace("-", " ").replace("%20", " ")
+    old_key = name.replace("-", " ").replace("%20", " ").replace("_", " ")
     new_key = new_name.strip().title()
     if not new_key:
         return JSONResponse({"error": "new_name required"}, status_code=400)
@@ -2050,7 +2050,7 @@ async def rename_speaker(name: str, new_name: str = Form(...)):
 
 @app.delete("/speakers/{name}")
 async def delete_speaker(name: str):
-    key = name.replace("-", " ").replace("%20", " ")
+    key = name.replace("-", " ").replace("%20", " ").replace("_", " ")
     filename = PROFILES_DIR / (key.replace(" ", "_") + ".npy")
     named_speakers.pop(key, None)
     if filename.exists():
