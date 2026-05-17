@@ -196,7 +196,7 @@ volumes:
 
 ### Live Transcript (`/ui/live`)
 
-![Live Transcript UI](https://raw.githubusercontent.com/Rahulsharma0810/omi-whisperx/main/docs/live-ui-preview.png)
+[![Live Transcript UI](https://excalidraw.com/favicon.ico) View interactive diagram →](https://excalidraw.com/#json=V3EOChdkm_X9jgqPCIT_7,MDTeu-BnUkIWVeQRDGrLAw)
 
 Segments stream in real time with speaker name, colour coding, and lag metrics:
 ```
