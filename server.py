@@ -517,6 +517,20 @@ def is_hallucination(seg: dict) -> bool:
     return False
 
 
+# Short filler phrases from ambient TV/radio that slip past VAD
+_TV_FILLER = re.compile(
+    r"^\s*(thank you\.?|thanks\.?|thank you very much\.?|you'?re welcome\.?|"
+    r"goodbye\.?|bye\.?|see you\.?|have a good day\.?|good night\.?|"
+    r"welcome\.?|excuse me\.?|sorry\.?|please\.?|okay\.?|ok\.?|yes\.?|no\.?|"
+    r"mm+\.?|hmm+\.?|uh+\.?|ah+\.?)\s*$",
+    re.IGNORECASE,
+)
+
+def is_tv_filler(text: str, speaker: str) -> bool:
+    """Return True for UNKNOWN short filler phrases likely from ambient TV/radio."""
+    return speaker == "UNKNOWN" and bool(_TV_FILLER.match(text.strip()))
+
+
 def get_speaker_embeddings(audio_path: str, diarize_segments) -> dict[str, np.ndarray]:
     """Extract per-speaker voice embeddings from diarized audio."""
     import soundfile as sf
@@ -883,12 +897,19 @@ async def _process_live_audio(
             # Embed whole utterance with resemblyzer (~0.1s) — match against enrolled speakers
             speaker_name = await asyncio.to_thread(_fast_identify_speaker, audio_path)
             t_diarize = time.time()
+            if speaker_name == "BLOCKED":
+                logger.debug("[WS] Utterance matches blocked voice — discarding")
+                return
             formatted = []
             for seg in segments:
                 if is_hallucination(seg):
                     continue
+                seg_text = seg.get("text", "").strip()
+                if is_tv_filler(seg_text, speaker_name):
+                    logger.debug(f"[WS] TV filler dropped: {seg_text!r}")
+                    continue
                 formatted.append({
-                    "text": seg.get("text", "").strip(),
+                    "text": seg_text,
                     "speaker": speaker_name,
                     "start": round(seg.get("start", 0.0), 2),
                     "end": round(seg.get("end", 0.0), 2),
