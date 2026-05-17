@@ -1,5 +1,6 @@
 import re
 import json
+from collections import Counter
 import struct
 import tempfile
 import os
@@ -499,10 +500,19 @@ def is_hallucination(seg: dict) -> bool:
     if not re.search(r"[a-zA-Z0-9\u0900-\u097F]", text):
         return True
 
-    # Repetitive loop (e.g. "the the the the the the the")
+    # Word-level repetition (e.g. "the the the the the the the")
     words = text.split()
     if len(words) > 6 and len(set(words)) / len(words) < 0.3:
         return True
+
+    # Phrase-level repetition (e.g. "It's hot in the evening. It's hot in the evening.")
+    # Check if any n-gram (n=4..6) repeats 3+ times
+    for n in (4, 5, 6):
+        if len(words) >= n * 3:
+            ngrams = [tuple(words[i:i+n]) for i in range(len(words) - n + 1)]
+            most_common_count = Counter(ngrams).most_common(1)[0][1]
+            if most_common_count >= 3:
+                return True
 
     return False
 
