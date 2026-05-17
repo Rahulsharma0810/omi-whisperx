@@ -1037,6 +1037,7 @@ async def _post_segments_to_omi(segments: list[dict], language: str, started_at:
         return
 
     def _do_post() -> None:
+        global _omi_rate_limit_until
         data = _json.dumps(payload).encode()
         req = urllib.request.Request(
             f"{OMI_API_BASE}/conversations/from-segments",
