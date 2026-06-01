@@ -121,6 +121,14 @@ BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 SKIP_DIARIZE = os.environ.get("SKIP_DIARIZE", "false").lower() == "true"  # legacy: no speaker id at all
 # Skip word-level alignment in live WebSocket path — saves ~2s, Omi only needs segment-level timestamps
 SKIP_LIVE_ALIGN = os.environ.get("SKIP_LIVE_ALIGN", "true").lower() == "true"
+# Live speaker ID: fast whole-utterance embedding (~0.1s) instead of full Sortformer
+# diarize + per-speaker embed (~1-3s). Pendant utterances are near-always single-speaker,
+# so per-utterance granularity is enough. Set false to restore in-utterance diarization.
+LIVE_FAST_SPEAKER_ID = os.environ.get("LIVE_FAST_SPEAKER_ID", "true").lower() == "true"
+# Default transcription language when the client sends none. Pinning (e.g. "hi")
+# skips Whisper's per-utterance language autodetect — ~30% faster, same output for
+# Hindi-dominant Hinglish. Empty = autodetect (original behavior).
+WHISPER_DEFAULT_LANG = os.environ.get("WHISPER_DEFAULT_LANG", "").strip() or None
 # Trust client-side VAD (Omi VAD Gate) — skip server VAD, flush on any 0.5s frame gap
 # Enable when iOS "VAD Gate" is ON — Omi already strips silence before sending
 TRUST_CLIENT_VAD = os.environ.get("TRUST_CLIENT_VAD", "true").lower() == "true"
@@ -464,6 +472,7 @@ named_speakers: dict[str, np.ndarray] = load_profiles()
 capture_pending: Optional[str] = None
 _omi_enroll: Optional[dict] = None  # {"name", "frames", "target", "done"}
 recent_text_buffer: list[str] = []
+_recent_seg_texts: list[str] = []  # cross-segment dedup window (last 20 segment texts)
 
 logger.info("Models ready.")
 
@@ -495,9 +504,9 @@ def is_hallucination(seg: dict) -> bool:
     if not re.search(r"[a-zA-Z0-9\u0900-\u097F]", text):
         return True
 
-    # Word-level repetition (e.g. "the the the the the the the")
+    # Word-level repetition (e.g. "public public public public" or "the the the...")
     words = text.split()
-    if len(words) > 6 and len(set(words)) / len(words) < 0.3:
+    if len(words) >= 2 and len(set(words)) / len(words) < 0.35:
         return True
 
     # Phrase-level repetition (e.g. "It's hot in the evening. It's hot in the evening.")
@@ -948,37 +957,54 @@ async def _process_live_audio(
             t_align = time.time()
 
         segments = result.get("segments", [])
-        # Sortformer MLX diarization — per-segment speaker labels via timestamp overlay
-        diarize_result = await asyncio.to_thread(diarize_model.generate, audio_path, threshold=0.5)
-        diarize_segs = diarize_result.segments  # list of objects with .start, .end, .speaker (int)
 
-        # Build per-speaker audio embeddings for name resolution
-        # Sortformer gives speaker index (0-3); we embed audio from each speaker's intervals
-        speaker_embeddings = await asyncio.to_thread(
-            _get_sortformer_embeddings, audio_path, diarize_segs
-        )
-        t_diarize = time.time()
+        if LIVE_FAST_SPEAKER_ID:
+            # Fast path: single whole-utterance embedding (~0.1s) vs Sortformer
+            # diarize + per-speaker embed (~1-3s). One speaker per utterance.
+            speaker = await asyncio.to_thread(_fast_identify_speaker, audio_path)
+            t_diarize = time.time()
+            if speaker == "BLOCKED":
+                logger.debug("[WS] Utterance from blocked voice — dropped")
+                return []
+            seg_labels = [speaker] * len(segments)
+        else:
+            # Full Sortformer MLX diarization — per-segment labels via timestamp overlay
+            diarize_result = await asyncio.to_thread(diarize_model.generate, audio_path, threshold=0.5)
+            diarize_segs = diarize_result.segments  # objects with .start, .end, .speaker (int)
+            speaker_embeddings = await asyncio.to_thread(
+                _get_sortformer_embeddings, audio_path, diarize_segs
+            )
+            t_diarize = time.time()
+            seg_labels = []
+            for seg in segments:
+                seg_mid = (seg.get("start", 0.0) + seg.get("end", 0.0)) / 2
+                label = "UNKNOWN"
+                for ds in diarize_segs:
+                    if ds.start <= seg_mid <= ds.end:
+                        label = f"SPEAKER_{ds.speaker:02d}"
+                        break
+                seg_labels.append(resolve_name(label, speaker_embeddings))
 
         formatted = []
-        for seg in segments:
+        for seg, resolved in zip(segments, seg_labels):
             if is_hallucination(seg):
+                continue
+            if resolved == "BLOCKED":
                 continue
             seg_start = seg.get("start", 0.0)
             seg_end = seg.get("end", 0.0)
-            seg_mid = (seg_start + seg_end) / 2
-            # Assign speaker by finding which diarize segment covers segment midpoint
-            label = "UNKNOWN"
-            for ds in diarize_segs:
-                if ds.start <= seg_mid <= ds.end:
-                    label = f"SPEAKER_{ds.speaker:02d}"
-                    break
-            resolved = resolve_name(label, speaker_embeddings)
-            if resolved == "BLOCKED":
-                continue
             seg_text = seg.get("text", "").strip()
             if is_tv_filler(seg_text, resolved):
                 logger.debug(f"[WS] TV filler dropped: {seg_text!r}")
                 continue
+            # Cross-segment dedup: drop if same text appeared in last 20 segments
+            seg_text_norm = seg_text.lower().strip()
+            if seg_text_norm in _recent_seg_texts:
+                logger.debug(f"[WS] Cross-seg dup dropped: {seg_text!r}")
+                continue
+            _recent_seg_texts.append(seg_text_norm)
+            if len(_recent_seg_texts) > 20:
+                _recent_seg_texts.pop(0)
             formatted.append({
                 "text": seg_text,
                 "speaker": resolved,
@@ -1115,6 +1141,8 @@ async def live_transcription(
     codec: str = "opus",
 ):
     await websocket.accept()
+    # Pin language when client sends none — skips per-utterance autodetect (~30% faster)
+    language = language or WHISPER_DEFAULT_LANG
     logger.info(f"[WS] Connected uid={uid} lang={language} sr={sample_rate} codec={codec}")
     emit_event("ws_connected", {"uid": uid, "lang": language, "codec": codec})
 
@@ -1217,8 +1245,9 @@ async def live_transcription(
                 if "No active speech" not in err and "Unspecified internal error" not in err:
                     logger.error(f"[WS] Utterance @{offset:.1f}s failed: {e}")
             finally:
-                # Release MPS memory after each utterance
-                if torch.backends.mps.is_available():
+                # Only alignment touches torch/MPS; fast path uses MLX. Skip the
+                # empty_cache sync stall when alignment didn't run.
+                if not SKIP_LIVE_ALIGN and torch.backends.mps.is_available():
                     torch.mps.empty_cache()
 
     def _schedule_utterance() -> None:
@@ -2167,6 +2196,7 @@ async def reset_all():
     capture_pending = None
     named_speakers.clear()
     recent_text_buffer.clear()
+    _recent_seg_texts.clear()  # reset cross-segment dedup window
     for f in PROFILES_DIR.glob("*.npy"):
         if not f.stem.startswith("__"):
             f.unlink()

@@ -46,8 +46,8 @@ sequenceDiagram
     P->>CF: PCM16 audio frames (WebSocket)
     CF->>S: wss://your-domain.com/live
     Note over S: VAD Gate — flush on 0.5s silence
-    S->>S: WhisperX transcribe (~2–4s)
-    S->>S: Resemblyzer speaker ID (~0.1s)
+    S->>S: lightning-whisper-mlx transcribe (~2s, Apple GPU)
+    S->>S: Fast speaker ID — whole-utterance embed (~0.03s)
     S-->>P: {"segments": [...]} → shown in app
     Note over S: 30s silence timer
     S->>O: POST /conversations/from-segments
@@ -55,12 +55,24 @@ sequenceDiagram
     Note over O: AI processing: title, action items, memory
 ```
 
+> **Live path latency (~2–3s end-to-end).** The WebSocket path is tuned for low
+> lag: per-utterance speaker ID uses a single whole-utterance embedding
+> (`~0.03s`) instead of full Sortformer diarization + per-speaker embedding
+> (`~1–3s`) — pendant utterances are near-always single-speaker. Word-level
+> alignment is skipped (`SKIP_LIVE_ALIGN`), and pinning the language
+> (`WHISPER_DEFAULT_LANG=hi`) skips Whisper's per-utterance autodetect for a
+> further ~30%. Set `LIVE_FAST_SPEAKER_ID=false` to restore in-utterance
+> Sortformer diarization (multi-speaker per utterance, higher lag).
+
 ### Speaker Identification Pipeline
 
 ```mermaid
 flowchart LR
-    A[Audio chunk] --> B[WhisperX<br/>transcribe]
-    B --> C[Resemblyzer<br/>embed utterance<br/>~0.1s]
+    A[Audio chunk] --> B[lightning-whisper-mlx<br/>transcribe]
+    B --> X{LIVE_FAST_SPEAKER_ID?}
+    X -->|true · live| C[Resemblyzer<br/>embed whole utterance<br/>~0.03s]
+    X -->|false| Y[Sortformer diarize<br/>+ per-speaker embed<br/>~1–3s]
+    Y --> C
     C --> D{Cosine similarity<br/>vs enrolled profiles}
     D -->|above threshold| E[Named speaker<br/>Rahul Sharma]
     D -->|below threshold| F{Blocked voice?}
@@ -237,6 +249,7 @@ All settings via environment variables. See `.env.example` for the full list.
 |---|---|---|
 | `WHISPER_MODEL` | `small` | `tiny` `base` `small` `medium` `large-v2` |
 | `WHISPER_BATCH_SIZE` | `16` | Lower to `4` on Raspberry Pi 5 |
+| `WHISPER_DEFAULT_LANG` | — | Pin language when client sends none (e.g. `hi`). Skips per-utterance autodetect (~30% faster); empty = autodetect |
 | `HF_TOKEN` | — | **Required** — HuggingFace token |
 
 ### Speaker Identification
@@ -254,6 +267,7 @@ All settings via environment variables. See `.env.example` for the full list.
 |---|---|---|
 | `TRUST_CLIENT_VAD` | `true` | Trust Omi VAD Gate — skip server-side VAD, flush on 0.5s frame gap |
 | `SKIP_LIVE_ALIGN` | `true` | Skip word-level alignment in WS path (saves ~2s, not needed for Omi) |
+| `LIVE_FAST_SPEAKER_ID` | `true` | `true` = single whole-utterance embed (~0.03s); `false` = Sortformer diarize + per-speaker embed (~1–3s, multi-speaker per utterance) |
 | `MAX_QUEUE_AGE` | `30` | Drop queued utterances older than N seconds |
 
 ### Omi API Integration

@@ -4,3 +4,6 @@ __pycache__/
 .env
 *.log
 .stfolder/
+
+# MLX model weights (downloaded at runtime, ~1.9GB)
+mlx_models/
