@@ -1,10 +1,9 @@
 # omi-whisperx
 
-> **Self-hosted, real-time speech-to-text for the [Omi](https://www.omi.me/) wearable** — powered by [WhisperX](https://github.com/m-bain/whisperX) with named speaker identification, direct Omi memory creation, and a live transcript dashboard.
+> **Self-hosted, real-time speech-to-text for the [Omi](https://www.omi.me/) wearable** — powered by [lightning-whisper-mlx](https://github.com/mustafaaljadery/lightning-whisper-mlx) (Apple Silicon GPU) with named speaker identification, direct Omi memory creation, and a live transcript dashboard.
 
 No Omi subscription required. Runs on **Mac Apple Silicon**, **Raspberry Pi 5**, or any **Linux/CUDA** machine.
 
-[![Docker](https://img.shields.io/badge/ghcr.io-omi--whisperx-blue?logo=docker)](https://ghcr.io/rahulsharma0810/omi-whisperx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -19,15 +18,14 @@ Omi's cloud STT costs money and sends your audio to third-party servers. This pr
 
 | | Feature |
 |---|---|
-| 🎙️ | **Real-time WebSocket STT** — streams from Omi pendant with ~2–4s lag |
+| 🎙️ | **Real-time WebSocket STT** — streams from Omi pendant with ~2–3s lag |
 | 👤 | **Named speaker identification** — "Rahul" instead of SPEAKER_00 |
-| ⚡ | **Fast speaker ID** — resemblyzer embed (~0.1s) vs pyannote diarization (~15s) |
+| ⚡ | **Fast speaker ID** — whole-utterance embed (~0.03s) vs Sortformer diarization (~1–3s) |
 | 🧠 | **Direct Omi memory creation** — POSTs transcript to Omi API after 30s silence, no 2-min wait |
 | 🚫 | **TV/movie voice filter** — blocks ambient entertainment audio from being saved as memories |
 | 📱 | **Live transcript UI** — real-time dashboard at `/ui/live` with speaker colour coding |
 | 🔊 | **Voice enrollment UI** — listen to unknown clips, assign names in one click |
 | 🏋️ | **Benchmark tool** — per-stage RTF measurement, hardware comparison |
-| 🐳 | **Multi-arch Docker** — arm64 (Raspberry Pi) + amd64 (Linux/CUDA) |
 | 🔔 | **Push notifications** — ntfy.sh alerts for pipeline events |
 
 ---
@@ -153,46 +151,6 @@ In Omi → Settings → Developer → **Cloud Provider > Custom**:
 | Language | `en` (or leave blank for auto-detect) |
 
 Enable **VAD Gate** in Omi app settings for best performance (strips silence before sending).
-
----
-
-## Docker
-
-```bash
-docker run -d \
-  --name omi-whisperx \
-  -p 8080:8080 \
-  -e HF_TOKEN=hf_... \
-  -e OMI_API_KEY=omi_dev_... \
-  -e WHISPER_MODEL=small \
-  -v ~/.omi:/data \
-  ghcr.io/rahulsharma0810/omi-whisperx:latest
-```
-
-### Docker Compose
-
-```yaml
-version: "3.9"
-services:
-  omi-whisperx:
-    image: ghcr.io/rahulsharma0810/omi-whisperx:latest
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      HF_TOKEN: hf_your_token
-      OMI_API_KEY: omi_dev_your_key
-      OMI_USER_NAME: "Your Name"       # marks your segments as is_user=true
-      WHISPER_MODEL: small             # tiny|base|small|medium|large-v2
-      WHISPER_BATCH_SIZE: "4"          # use 4 on Raspberry Pi 5
-      SPEAKER_THRESHOLD: "0.85"
-      FAST_SPEAKER: "true"             # resemblyzer (~0.1s) vs pyannote (~15s)
-      TRUST_CLIENT_VAD: "true"         # use Omi VAD Gate, skip server VAD
-    volumes:
-      - omi_data:/data
-volumes:
-  omi_data:
-```
 
 ---
 
